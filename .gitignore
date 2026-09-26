@@ -7,3 +7,5 @@ recipes/*
 *.bak.json
 # 本地覆盖配置
 config.local.json
+__pycache__/
+*.pyc

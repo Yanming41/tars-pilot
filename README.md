@@ -9,13 +9,14 @@ real OS-level mouse/keyboard input does the rest. Successful runs can be saved a
 
 ---
 
-## 三个入口
+## 入口
 
 | 入口 | 结构 | 适合 |
 |---|---|---|
 | `agent.mjs`（推荐） | **GPT 规划** + **本地 UI-TARS 定位** | 多步任务、第一次做的流程；`--save` 录成模板 |
 | `replay.mjs` | 按模板回放，UI-TARS 只负责定位，**不调用 GPT**；某步失败自动交给 GPT | 固定流程，快且不耗订阅额度 |
 | `uitars.mjs` | UI-TARS 单模型（自己想、自己定位），完全本地 | 很短的任务 |
+| `server.mjs` | 本地 HTTP 接口，把上面的能力开放给别的程序 | 爬虫等自动化流程接入 |
 
 ## 前提
 
@@ -73,6 +74,42 @@ nut-js 执行（Windows SendInput）→ 对比前后截图判断界面有没有�
 - 失败后自动交给 GPT 从当前画面继续（`--no-fallback` 关闭）。`--heal`：GPT 成功后用"失败前的模板步骤 + GPT 新步骤"更新模板（旧版存为 `NAME.bak.json`）。如果失败原因是起始状态特殊（比如窗口都最小化了），别用 heal。
 - `--check-expect`：让 UI-TARS 判断每步 `expect` 是否成立。**实测不可靠**（对不成立的描述也常答"是"），默认关闭。
 
+## 本地 HTTP 接口（给爬虫等程序调用）
+
+```powershell
+node server.mjs      # 默认 http://127.0.0.1:8765；需要 start-server.ps1 的模型服务也在跑
+```
+
+| 接口 | 说明 |
+|---|---|
+| `GET /health` | `{ ok, grounder: 本地 UI-TARS 是否在线, busy, queued }` |
+| `GET /recipes`、`GET /recipes/:name` | 模板列表 / 内容 |
+| `POST /runs` | 提交任务，默认等执行完再返回；加 `"wait": false` 立刻返回任务 id |
+| `GET /runs`、`GET /runs/:id` | 任务状态、结果（`result.answer / usedGPT / failedStep`）、执行日志（`log`） |
+| `POST /runs/:id/cancel` | 取消：排队中的直接移除，执行中的在当前步骤后停 |
+
+```jsonc
+// 模板回放（失败时默认交给 GPT 兜底）
+{ "recipe": "xhs-search", "vars": { "keyword": "电动滑板车" }, "fallback": true, "heal": false }
+// GPT 任务（可顺便存成模板）
+{ "task": "在小红书搜索 {{keyword}}", "vars": { "keyword": "电动滑板车" }, "save": "xhs-search", "maxSteps": 25 }
+```
+
+- 鼠标键盘只有一套，所有任务**排队串行**执行。
+- 安全：只监听 127.0.0.1；拒绝带 `Origin` 头的请求、POST 只收 `application/json`（防止你浏览器里打开的网页偷偷调用）；可在 `config.json` 里设 `server.token`，之后请求要带 `Authorization: Bearer <token>`。
+- Python 客户端（纯标准库，复制即用）：[`clients/python/tars_pilot_client.py`](clients/python/tars_pilot_client.py)
+
+```python
+from tars_pilot_client import TarsPilot
+tp = TarsPilot()
+r = tp.run_recipe("xhs-search", {"keyword": "电动滑板车"})
+if r["status"] == "done":
+    ...  # 接着用你自己的 CDP / Playwright 抓结果
+```
+
+- Node：直接 `fetch('http://127.0.0.1:8765/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({...}) })`（Node 的 fetch 不带 Origin 头）。
+- 注意：操作的是**当前前台窗口**。调用前先把目标浏览器窗口切到前台（比如 CDP `Page.bringToFront`）；如果你的程序用 CDP 改过页面尺寸（`Emulation.setDeviceMetricsOverride`），视觉操作前要先 `Emulation.clearDeviceMetricsOverride`，否则页面布局和录模板时不一样。
+
 ## config.json
 
 - `baseURL` / `model`：本地 vLLM
@@ -80,6 +117,7 @@ nut-js 执行（Windows SendInput）→ 对比前后截图判断界面有没有�
 - `grounderPrompt`：`short`（默认，只输出坐标，快约 1s）/ `full`（先 Thought 再坐标）
 - `maxSteps`、`maxNoChange`、`minChangedPixels`、`settleMs`（每步动作后等待）、`debug`
 - `replay.verifyTimeoutMs`、`replay.checkExpect`
+- `server.host`（默认 127.0.0.1）、`server.port`（默认 8765）、`server.token`（默认空，不校验）
 
 ## 实测（RTX 3080 Laptop 16GB，Windows 11，175% 缩放）
 

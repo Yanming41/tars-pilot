@@ -7,10 +7,9 @@
 //       node agent.mjs --max-steps 30 "..."
 //       录制成模板（成功后保存到 recipes/NAME.json，任务里的 {{变量}} 会保留在模板里）：
 //       node agent.mjs --save bing-search --var keyword=UI-TARS "打开Chrome，访问 bing.com，搜索 {{keyword}}"
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { cfg, here, parseArgs, fillVars, templatize } from './lib.mjs';
+import { cfg, parseArgs, fillVars } from './lib.mjs';
 import { runAgent } from './planner.mjs';
+import { saveRecipe } from './recipes.mjs';
 
 const opts = parseArgs(process.argv.slice(2));
 if (!opts.text) {
@@ -33,19 +32,9 @@ console.log(`\n[${result.status}] (+${((Date.now() - t0) / 1000).toFixed(1)}s) $
 if (opts.save) {
   if (result.status !== 'done') {
     console.log('任务没有成功完成，不保存模板');
-  } else if (!steps.length) {
-    console.log('没有执行任何动作（屏幕一开始就满足任务），不保存模板；换个起始状态或变量值再录');
   } else {
-    mkdirSync(join(here, 'recipes'), { recursive: true });
-    const file = join(here, 'recipes', `${opts.save}.json`);
-    const recipe = {
-      name: opts.save,
-      task: opts.text, // 保留 {{变量}}
-      vars: opts.vars, // 录制时用的值，回放时不传 --var 就用这些
-      createdAt: new Date().toISOString(),
-      steps: steps.map((st) => templatize(st, opts.vars)),
-    };
-    writeFileSync(file, JSON.stringify(recipe, null, 2));
-    console.log(`模板已保存: ${file}（${steps.length} 步）`);
+    const file = saveRecipe(opts.save, opts.text, opts.vars, steps);
+    console.log(file ? `模板已保存: ${file}（${steps.length} 步）` : '没有执行任何动作（屏幕一开始就满足任务），不保存模板；换个起始状态或变量值再录');
   }
 }
+process.exit(result.status === 'done' ? 0 : 1);
