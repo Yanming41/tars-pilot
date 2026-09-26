@@ -1,0 +1,13 @@
+{
+  "baseURL": "http://127.0.0.1:8000/v1",
+  "apiKey": "local",
+  "model": "ui-tars",
+  "maxTokens": 1024,
+  "maxSteps": 25,
+  "language": "Chinese",
+  "planner": {
+    "effort": "low",
+    "screenshotWidth": 1280
+  },
+  "maxNoChange": 4
+}

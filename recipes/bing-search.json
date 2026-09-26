@@ -1,0 +1,21 @@
+{
+  "name": "bing-search",
+  "task": "在Google Chrome浏览器里打开 bing.com，搜索 {{keyword}}，搜索结果页出现后就算完成",
+  "vars": {
+    "keyword": "Qwen3-VL"
+  },
+  "createdAt": "2026-09-25T19:04:12.043Z",
+  "steps": [
+    {
+      "action": "hotkey",
+      "keys": "ctrl l",
+      "expect": "Chrome 顶部地址栏中的当前网址被全选高亮。"
+    },
+    {
+      "action": "type",
+      "text": "https://www.bing.com/search?q={{keyword}}",
+      "submit": true,
+      "expect": "浏览器加载 Bing 的 {{keyword}} 搜索结果页，页面上出现 {{keyword}} 相关结果。"
+    }
+  ]
+}

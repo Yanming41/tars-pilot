@@ -1,0 +1,9 @@
+node_modules/
+# 运行时截图（包含你的桌面内容），绝对不要提交
+.planner-work/
+# 个人录制的模板；仓库只带一个示例
+recipes/*
+!recipes/bing-search.json
+*.bak.json
+# 本地覆盖配置
+config.local.json

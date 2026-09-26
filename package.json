@@ -1,0 +1,25 @@
+{
+  "name": "tars-pilot",
+  "version": "0.1.0",
+  "description": "Pure-vision desktop & web automation: GPT (via Codex / ChatGPT subscription) plans, local UI-TARS-1.5-7B grounds clicks, with record/replay templates and self-healing fallback.",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "agent": "node agent.mjs",
+    "replay": "node replay.mjs",
+    "uitars": "node uitars.mjs"
+  },
+  "dependencies": {
+    "@computer-use/nut-js": "4.2.0",
+    "@openai/codex-sdk": "0.157.0",
+    "@ui-tars/action-parser": "1.2.3",
+    "@ui-tars/operator-nut-js": "1.2.3",
+    "@ui-tars/sdk": "1.2.3",
+    "jimp": "1.6.0",
+    "openai": "5.23.2",
+    "uuid": "14.0.2"
+  }
+}
