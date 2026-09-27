@@ -1,7 +1,7 @@
 // 模板的保存 / 列出 / 回放（replay.mjs 命令行和 server.mjs 接口共用）
 import { readFileSync, writeFileSync, readdirSync, copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { cfg, here, fillVars, templatize, capture, isChanged, runStep, askGrounder, describeStep, sleep } from './lib.mjs';
+import { cfg, here, fillVars, templatize, capture, isChanged, runStep, askGrounder, describeStep, sleep, focusWindow } from './lib.mjs';
 import { runAgent } from './planner.mjs';
 
 export const recipesDir = join(here, 'recipes');
@@ -16,7 +16,7 @@ export function listRecipes() {
     .filter((f) => f.endsWith('.json') && !f.endsWith('.bak.json'))
     .map((f) => {
       const r = JSON.parse(readFileSync(join(recipesDir, f), 'utf-8'));
-      return { name: r.name, task: r.task, vars: r.vars, steps: r.steps.length, createdAt: r.createdAt, updatedAt: r.updatedAt };
+      return { name: r.name, task: r.task, vars: r.vars, focus: r.focus, steps: r.steps.length, createdAt: r.createdAt, updatedAt: r.updatedAt };
     });
 }
 
@@ -25,7 +25,8 @@ export function loadRecipe(name) {
 }
 
 // 把 runAgent 实际执行的步骤存成模板；0 步不存。返回保存路径或 null
-export function saveRecipe(name, taskTemplate, vars, steps) {
+// focus：回放前要切到前台的窗口标题关键字（录制时用了 --focus 就一起存下来）
+export function saveRecipe(name, taskTemplate, vars, steps, focus) {
   if (!steps.length) return null;
   mkdirSync(recipesDir, { recursive: true });
   const file = recipeFile(name);
@@ -33,6 +34,7 @@ export function saveRecipe(name, taskTemplate, vars, steps) {
     name,
     task: taskTemplate, // 保留 {{变量}}
     vars, // 录制时用的值，回放时不传就用这些
+    ...(focus ? { focus } : {}),
     createdAt: new Date().toISOString(),
     steps: steps.map((st) => templatize(st, vars)),
   };
@@ -51,7 +53,7 @@ async function expectHolds(shot, expect) {
  * 某步执行后界面没变化（或 expect 检查不通过）就交给 GPT 从当前画面接着做。
  * 返回 { status: 'done'|'fail'|'cancelled', answer, usedGPT, failedStep, reason, durationMs, healed }
  */
-export async function runRecipe({ name, vars = {}, fallback = true, heal = false, checkExpect, maxSteps, signal }) {
+export async function runRecipe({ name, vars = {}, fallback = true, heal = false, checkExpect, maxSteps, signal, focus }) {
   const recipe = loadRecipe(name);
   const allVars = { ...recipe.vars, ...vars };
   const task = fillVars(recipe.task, allVars);
@@ -72,6 +74,16 @@ export async function runRecipe({ name, vars = {}, fallback = true, heal = false
       if (isChanged(before.thumb, after.thumb)) return after;
       if (Date.now() > deadline || signal?.aborted) return null;
       await sleep(1000);
+    }
+  }
+
+  const focusTitle = focus ?? recipe.focus;
+  if (focusTitle) {
+    try {
+      await focusWindow(focusTitle);
+      await sleep(500);
+    } catch (e) {
+      return finish({ status: 'fail', answer: e.message, reason: e.message });
     }
   }
 

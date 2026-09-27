@@ -1,5 +1,6 @@
 // uitars.mjs / agent.mjs / replay.mjs 共用的部分：配置、截图、UI-TARS 定位、动作执行、模板变量
 import { readFileSync, existsSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -99,6 +100,23 @@ export function smartResize(height, width, factor = 28, minPixels = 78400, maxPi
     w = Math.ceil((width * beta) / factor) * factor;
   }
   return { height: h, width: w };
+}
+
+// ---------- 窗口 ----------
+// 把标题包含 title 的窗口切到前台。nut-js 读中文窗口标题是乱码、CDP 的 Page.bringToFront 又提不起系统窗口，
+// 所以用 focus-window.ps1（Win32 API + 模拟 Alt 键绕过 Windows 的防抢焦点限制）
+export function focusWindow(title) {
+  return new Promise((resolve, reject) => {
+    execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(here, 'focus-window.ps1'), '-Title', title],
+      { windowsHide: true, timeout: 30000, encoding: 'utf8' }, (err, stdout) => {
+        const out = (stdout ?? '').trim();
+        if (out.startsWith('OK ')) {
+          console.log(`  切到窗口: ${out.slice(3)}`);
+          return resolve(out.slice(3));
+        }
+        reject(new Error(out === 'NOT_FOUND' ? `没有找到标题包含「${title}」的窗口` : `切换窗口失败（${title}）: ${out || err?.message}`));
+      });
+  });
 }
 
 // ---------- 截图 ----------

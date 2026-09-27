@@ -9,6 +9,7 @@
 //   GET  /recipes                  模板列表          GET /recipes/:name  模板内容
 //   POST /runs                     提交任务（默认等执行完再返回；"wait": false 则立刻返回 id）
 //        模板回放: { "recipe": "xhs-search", "vars": {"keyword": "电动滑板车"}, "fallback": true, "heal": false }
+//        两种任务都可以加 "focus": "小红书"：开始前把标题包含这段文字的窗口切到前台（模板里存了 focus 的话默认用模板的）
 //        GPT 任务: { "task": "打开...搜索 {{keyword}}", "vars": {...}, "save": "模板名(可选)", "maxSteps": 25 }
 //   GET  /runs  /runs/:id          任务状态/结果/日志
 //   POST /runs/:id/cancel          取消（排队中的直接移除，执行中的会在当前步骤后停下）
@@ -57,6 +58,7 @@ async function execute(run) {
       checkExpect: req.checkExpect,
       maxSteps: req.maxSteps,
       signal,
+      focus: req.focus,
     });
   }
   const t0 = Date.now();
@@ -64,9 +66,10 @@ async function execute(run) {
     task: fillVars(req.task, req.vars ?? {}),
     maxSteps: req.maxSteps ?? cfg.maxSteps ?? 25,
     signal,
+    focus: req.focus,
   });
   let saved = null;
-  if (req.save && result.status === 'done') saved = saveRecipe(req.save, req.task, req.vars ?? {}, steps);
+  if (req.save && result.status === 'done') saved = saveRecipe(req.save, req.task, req.vars ?? {}, steps, req.focus);
   return { ...result, usedGPT: true, steps: steps.length, saved, usage, durationMs: Date.now() - t0 };
 }
 

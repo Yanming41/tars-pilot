@@ -108,7 +108,7 @@ if r["status"] == "done":
 ```
 
 - Node：直接 `fetch('http://127.0.0.1:8765/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({...}) })`（Node 的 fetch 不带 Origin 头）。
-- 注意：操作的是**当前前台窗口**。调用前先把目标浏览器窗口切到前台（比如 CDP `Page.bringToFront`）；如果你的程序用 CDP 改过页面尺寸（`Emulation.setDeviceMetricsOverride`），视觉操作前要先 `Emulation.clearDeviceMetricsOverride`，否则页面布局和录模板时不一样。
+- 注意：操作的是**当前前台窗口**。请求里加 `"focus": "窗口标题关键字"`（或命令行 `--focus`），会先把那个窗口切到系统前台（`focus-window.ps1`：Win32 API + 模拟 Alt 键绕过 Windows 防抢焦点；CDP 的 `Page.bringToFront` 只切标签页、提不起系统窗口）。录制时带了 `--focus` 的模板会记住它，回放自动先切。如果你的程序用 CDP 改过页面尺寸（`Emulation.setDeviceMetricsOverride`），视觉操作前要先 `Emulation.clearDeviceMetricsOverride`，否则页面布局和录模板时不一样。
 
 ## config.json
 

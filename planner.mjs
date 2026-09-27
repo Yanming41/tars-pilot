@@ -2,7 +2,7 @@
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { Codex } from '@openai/codex-sdk';
-import { cfg, here, capture, isChanged, runStep } from './lib.mjs';
+import { cfg, here, capture, isChanged, runStep, focusWindow, sleep } from './lib.mjs';
 
 const schema = {
   type: 'object',
@@ -39,7 +39,8 @@ ${context ? `\n补充情况：${context}\n` : ''}
 8. 任务完成后返回 status=done，answer 里写结果（如果任务要求读取信息，把信息写进 answer）。`;
 
 // 返回 { result: {status, answer}, steps: [已执行的动作（统一步骤格式，含 expect）], usage }
-export async function runAgent({ task, context = '', maxSteps = cfg.maxSteps ?? 25, signal, workDir = join(here, '.planner-work') }) {
+// focus：开始前先把标题包含这段文字的窗口切到前台
+export async function runAgent({ task, context = '', maxSteps = cfg.maxSteps ?? 25, signal, focus, workDir = join(here, '.planner-work') }) {
   const plannerCfg = { effort: 'low', screenshotWidth: 1280, ...cfg.planner };
   rmSync(workDir, { recursive: true, force: true });
   mkdirSync(workDir, { recursive: true });
@@ -53,6 +54,11 @@ export async function runAgent({ task, context = '', maxSteps = cfg.maxSteps ?? 
     webSearchEnabled: false,
     workingDirectory: workDir,
   });
+
+  if (focus) {
+    await focusWindow(focus);
+    await sleep(500);
+  }
 
   const t0 = Date.now();
   const secs = () => ((Date.now() - t0) / 1000).toFixed(1);

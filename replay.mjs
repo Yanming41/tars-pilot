@@ -17,7 +17,7 @@ if (opts.list) {
   process.exit(0);
 }
 if (!opts.text) {
-  console.error('用法: node replay.mjs NAME [--var k=v ...] [--heal] [--no-fallback] [--check-expect]  |  node replay.mjs --list');
+  console.error('用法: node replay.mjs NAME [--var k=v ...] [--focus 窗口标题] [--heal] [--no-fallback] [--check-expect]  |  node replay.mjs --list');
   process.exit(1);
 }
 
@@ -32,6 +32,7 @@ const r = await runRecipe({
   checkExpect: opts['check-expect'] ? true : undefined,
   maxSteps: opts['max-steps'] ? Number(opts['max-steps']) : undefined,
   signal: abort.signal,
+  focus: opts.focus,
 });
 if (r.usedGPT) console.log(`\n[${r.status}] ${r.answer}`);
 process.exit(r.status === 'done' ? 0 : 1);
