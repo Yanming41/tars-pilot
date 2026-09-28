@@ -53,6 +53,20 @@ node replay.mjs --list
 
 每次 `agent.mjs` 运行的缩小截图（带红圈）和 `trace.json` 在 `.planner-work/`（已 gitignore，里面是你的桌面截图）。
 
+## 两种驱动：CDP（不占鼠标）vs 系统（真实鼠标）
+
+| 驱动 | 怎么选 | 眼睛 / 手 | 适合 |
+|---|---|---|---|
+| **CDP**（推荐用于网页） | `--cdp xiaohongshu.com` / 请求里 `"cdp": "..."` / 模板里存了 `cdp` | 只截那个 Chrome 标签页；点击/输入通过 CDP 注入页面 | 网页自动化，**不动你的真实鼠标键盘，跑的时候你可以照常用电脑** |
+| 系统 | 默认；`--focus 窗口标题` 先切到前台 | 截整个屏幕；nut-js 真实鼠标键盘 | 桌面软件、非 Chrome 程序 |
+
+CDP 驱动要点：
+- Chrome 要以 `--remote-debugging-port=9222` 启动，并**建议加** `--disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`（否则窗口被挡住/最小化时 Chrome 不出新画面，截图会超时）。
+- 驱动连接时固定视口为 1280×800（`config.json` 的 `cdpViewport` 可改），布局不随窗口大小变化；退出时还原。
+- Chrome 窗口放在其他窗口后面即可，**别最小化**：最小化时截图偶尔超时，驱动会重试，并把窗口还原（不抢焦点）。
+- 截图里没有地址栏，打开网址用 `navigate` 动作（规划器会自动用）。
+- `ctrl a/c/v/x/z` 这类编辑快捷键会带上 Chrome 的编辑命令，真的全选/复制/粘贴。
+
 ## agent.mjs 每一步
 
 ```

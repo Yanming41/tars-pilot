@@ -1,4 +1,8 @@
-// uitars.mjs / agent.mjs / replay.mjs 共用的部分：配置、截图、UI-TARS 定位、动作执行、模板变量
+// uitars.mjs / agent.mjs / replay.mjs / server.mjs 共用的部分：配置、截图、UI-TARS 定位、动作执行、模板变量
+//
+// 两种"驱动"（眼睛 + 手）：
+//   osDriver  —— 截整个屏幕、用系统真实鼠标键盘操作（能操作任何桌面软件，但会占用你的鼠标）
+//   CdpDriver —— 见 cdp.mjs：只截某个 Chrome 标签页、往页面里注入输入事件（不动你的鼠标，Chrome 被挡住也行）
 import { readFileSync, existsSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -104,7 +108,7 @@ export function smartResize(height, width, factor = 28, minPixels = 78400, maxPi
 
 // ---------- 窗口 ----------
 // 把标题包含 title 的窗口切到前台。nut-js 读中文窗口标题是乱码、CDP 的 Page.bringToFront 又提不起系统窗口，
-// 所以用 focus-window.ps1（Win32 API + 模拟 Alt 键绕过 Windows 的防抢焦点限制）
+// 所以用 focus-window.ps1（Win32 API + 模拟 Alt 键绕过 Windows 的防抢焦点限制）。只有 osDriver 需要
 export function focusWindow(title) {
   return new Promise((resolve, reject) => {
     execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(here, 'focus-window.ps1'), '-Title', title],
@@ -119,18 +123,70 @@ export function focusWindow(title) {
   });
 }
 
+// ---------- 系统驱动：整个屏幕 + 真实鼠标键盘 ----------
+const nutOperator = new HiResNutJSOperator();
+const esc = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
+
+// 拼成 UI-TARS 动作字符串，复用官方解析器 + 高清版 NutJS 操控器
+async function nutExecute(shot, actionStr) {
+  const { parsed } = actionParser({
+    prediction: `Thought: -\nAction: ${actionStr}`,
+    factor: [1000, 1000],
+    screenContext: { width: shot.width, height: shot.height },
+    scaleFactor: shot.scaleFactor,
+    modelVer: UITarsModelVersion.V1_5,
+  });
+  if (!parsed?.length) throw new Error(`动作解析失败: ${actionStr}`);
+  await nutOperator.execute({
+    prediction: actionStr,
+    parsedPrediction: parsed[0],
+    factors: [1000, 1000],
+    screenWidth: shot.width,
+    screenHeight: shot.height,
+    scaleFactor: shot.scaleFactor,
+  });
+}
+
+export const osDriver = {
+  kind: 'os',
+  async grab() {
+    const raw = await (await screen.grab()).toRGB();
+    return { img: Jimp.fromBitmap({ width: raw.width, height: raw.height, data: Buffer.from(raw.data) }), scaleFactor: raw.pixelDensity.scaleX };
+  },
+  // g：ground() 的结果（mx/my 模型坐标，px/py 截图像素坐标）
+  async click(shot, g, { button = 'left', count = 1 } = {}) {
+    const fn = button === 'right' ? 'right_single' : count === 2 ? 'left_double' : 'click';
+    await nutExecute(shot, `${fn}(start_box='(${g.mx},${g.my})')`);
+  },
+  async scroll(shot, g, direction) {
+    await nutExecute(shot, `scroll(start_box='(${g.mx},${g.my})', direction='${direction}')`);
+  },
+  async type(shot, text, submit) {
+    await nutExecute(shot, `type(content='${esc(text + (submit ? '\n' : ''))}')`);
+  },
+  async hotkey(shot, keys) {
+    await nutExecute(shot, `hotkey(key='${esc(keys)}')`);
+  },
+  async navigate(shot, url) {
+    await this.hotkey(shot, 'ctrl l');
+    await this.type(shot, url, true);
+  },
+  close() {},
+};
+
 // ---------- 截图 ----------
-// plannerPath 给了才会额外存一张缩小图（给 GPT 看），并用红圈标出 lastClick（物理像素坐标）
-export async function capture({ plannerPath, plannerWidth = 1280, lastClick } = {}) {
-  const raw = await (await screen.grab()).toRGB();
-  const full = Jimp.fromBitmap({ width: raw.width, height: raw.height, data: Buffer.from(raw.data) });
+// plannerPath 给了才会额外存一张缩小图（给 GPT 看），并用红圈标出 lastClick（截图像素坐标）
+export async function capture(driver = osDriver, { plannerPath, plannerWidth = 1280, lastClick } = {}) {
+  const { img: full, scaleFactor } = await driver.grab();
+  const width = full.bitmap.width;
+  const height = full.bitmap.height;
   const hiB64 = (await full.getBuffer('image/jpeg', { quality: 85 })).toString('base64');
 
   if (plannerPath) {
-    const w = plannerWidth;
-    const small = full.clone().resize({ w, h: Math.round((raw.height * w) / raw.width) });
+    const w = Math.min(plannerWidth, width);
+    const small = full.clone().resize({ w, h: Math.round((height * w) / width) });
     if (lastClick) {
-      const k = w / raw.width;
+      const k = w / width;
       const cx = lastClick.px * k;
       const cy = lastClick.py * k;
       for (let r = 14; r <= 17; r++) {
@@ -146,7 +202,7 @@ export async function capture({ plannerPath, plannerWidth = 1280, lastClick } = 
 
   // 用于判断"界面有没有变化"的小灰度图
   const thumb = full.clone().resize({ w: 320, h: 180 }).greyscale().bitmap.data;
-  return { hiB64, width: raw.width, height: raw.height, scaleFactor: raw.pixelDensity.scaleX, plannerPath, thumb };
+  return { hiB64, width, height, scaleFactor, plannerPath, thumb };
 }
 
 // 变化的像素个数（320x180 灰度图上）。计算器数字从 0 变 1 这种小变化也只有十几个像素，所以按个数不按比例
@@ -201,35 +257,18 @@ export async function ground(shot, target) {
   const { width: rw, height: rh } = smartResize(shot.height, shot.width);
   const mx = Number(m[1]);
   const my = Number(m[2]);
-  // mx/my：模型坐标（缩放后空间，交给解析器）；px/py：物理像素位置（画红圈、打日志）
+  // mx/my：模型坐标（缩放后空间，os 驱动交给解析器）；px/py：截图像素坐标（cdp 驱动点击、画红圈、打日志）
   return { mx, my, px: Math.round((mx / rw) * shot.width), py: Math.round((my / rh) * shot.height) };
 }
 
-// ---------- 执行：拼成 UI-TARS 动作字符串，复用官方解析器 + 高清版 NutJS 操控器 ----------
-const operator = new HiResNutJSOperator();
-const esc = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
-
-async function execute(shot, actionStr) {
-  const { parsed } = actionParser({
-    prediction: `Thought: -\nAction: ${actionStr}`,
-    factor: [1000, 1000],
-    screenContext: { width: shot.width, height: shot.height },
-    scaleFactor: shot.scaleFactor,
-    modelVer: UITarsModelVersion.V1_5,
-  });
-  if (!parsed?.length) throw new Error(`动作解析失败: ${actionStr}`);
-  await operator.execute({
-    prediction: actionStr,
-    parsedPrediction: parsed[0],
-    factors: [1000, 1000],
-    screenWidth: shot.width,
-    screenHeight: shot.height,
-    scaleFactor: shot.scaleFactor,
-  });
+// 截图中央（scroll 没给目标时用）
+function center(shot) {
+  const rs = smartResize(shot.height, shot.width);
+  return { mx: Math.round(rs.width / 2), my: Math.round(rs.height / 2), px: Math.round(shot.width / 2), py: Math.round(shot.height / 2) };
 }
 
 // 一步动作的统一格式（规划器输出和模板共用）：
-//   { action: click|double_click|right_click|type|hotkey|scroll|wait, target?, text?, submit?, keys?, direction?, seconds?, expect? }
+//   { action: click|double_click|right_click|type|hotkey|scroll|navigate|wait, target?, text?, submit?, keys?, direction?, seconds?, expect? }
 export function describeStep(st) {
   switch (st.action) {
     case 'click':
@@ -242,6 +281,8 @@ export function describeStep(st) {
       return `按快捷键 ${st.keys}`;
     case 'scroll':
       return `在${st.target || '屏幕中央'}向${st.direction === 'up' ? '上' : '下'}滚动`;
+    case 'navigate':
+      return `打开网址 ${st.text}`;
     case 'wait':
       return `等待 ${st.seconds ?? 3} 秒`;
     default:
@@ -249,42 +290,43 @@ export function describeStep(st) {
   }
 }
 
-// 执行一步，返回 { desc, click }；click 是实际点击位置（物理像素），用于给规划器画红圈
-export async function runStep(shot, st) {
+// 执行一步，返回 { desc, click }；click 是实际点击位置（截图像素坐标），用于给规划器画红圈
+export async function runStep(shot, st, driver = osDriver) {
+  const settle = () => (driver.kind === 'os' ? null : sleep(cfg.settleMs ?? 1000)); // os 驱动的操控器自己会等
   switch (st.action) {
     case 'click':
     case 'double_click':
     case 'right_click': {
       const tg = Date.now();
       const g = await ground(shot, st.target);
-      const fn = { click: 'click', double_click: 'left_double', right_click: 'right_single' }[st.action];
       console.log(`  动作: ${describeStep(st)} → 定位 (${g.px},${g.py})，${((Date.now() - tg) / 1000).toFixed(1)}s`);
-      await execute(shot, `${fn}(start_box='(${g.mx},${g.my})')`);
-      return { desc: `${describeStep(st)}，点在屏幕 (${g.px},${g.py})（截图上的红圈）`, click: g };
+      await driver.click(shot, g, { button: st.action === 'right_click' ? 'right' : 'left', count: st.action === 'double_click' ? 2 : 1 });
+      await settle();
+      return { desc: `${describeStep(st)}，点在 (${g.px},${g.py})（截图上的红圈）`, click: g };
     }
     case 'type':
       console.log(`  动作: ${describeStep(st)}`);
-      await execute(shot, `type(content='${esc(st.text + (st.submit ? '\n' : ''))}')`);
+      await driver.type(shot, st.text, !!st.submit);
+      await settle();
       return { desc: describeStep(st) };
     case 'hotkey':
       console.log(`  动作: ${describeStep(st)}`);
-      await execute(shot, `hotkey(key='${esc(st.keys)}')`);
+      await driver.hotkey(shot, st.keys);
+      await settle();
       return { desc: describeStep(st) };
     case 'scroll': {
       const dir = st.direction === 'up' ? 'up' : 'down';
-      let mx;
-      let my;
-      if (st.target) {
-        ({ mx, my } = await ground(shot, st.target));
-      } else {
-        const rs = smartResize(shot.height, shot.width);
-        mx = Math.round(rs.width / 2);
-        my = Math.round(rs.height / 2);
-      }
+      const g = st.target ? await ground(shot, st.target) : center(shot);
       console.log(`  动作: ${describeStep(st)}`);
-      await execute(shot, `scroll(start_box='(${mx},${my})', direction='${dir}')`);
+      await driver.scroll(shot, g, dir);
+      await settle();
       return { desc: describeStep(st) };
     }
+    case 'navigate':
+      console.log(`  动作: ${describeStep(st)}`);
+      await driver.navigate(shot, st.text);
+      await settle();
+      return { desc: describeStep(st) };
     case 'wait':
       console.log(`  动作: ${describeStep(st)}`);
       await sleep((st.seconds ?? 3) * 1000);

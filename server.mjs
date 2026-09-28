@@ -9,7 +9,8 @@
 //   GET  /recipes                  模板列表          GET /recipes/:name  模板内容
 //   POST /runs                     提交任务（默认等执行完再返回；"wait": false 则立刻返回 id）
 //        模板回放: { "recipe": "xhs-search", "vars": {"keyword": "电动滑板车"}, "fallback": true, "heal": false }
-//        两种任务都可以加 "focus": "小红书"：开始前把标题包含这段文字的窗口切到前台（模板里存了 focus 的话默认用模板的）
+//        两种任务都可以加 "cdp": "xiaohongshu.com"：用 CDP 驱动只操作那个 Chrome 标签页，不动真实鼠标（推荐）
+//        或 "focus": "小红书"：用系统驱动，开始前把标题包含这段文字的窗口切到前台（模板里存了的话默认用模板的）
 //        GPT 任务: { "task": "打开...搜索 {{keyword}}", "vars": {...}, "save": "模板名(可选)", "maxSteps": 25 }
 //   GET  /runs  /runs/:id          任务状态/结果/日志
 //   POST /runs/:id/cancel          取消（排队中的直接移除，执行中的会在当前步骤后停下）
@@ -59,6 +60,7 @@ async function execute(run) {
       maxSteps: req.maxSteps,
       signal,
       focus: req.focus,
+      cdp: req.cdp,
     });
   }
   const t0 = Date.now();
@@ -67,9 +69,10 @@ async function execute(run) {
     maxSteps: req.maxSteps ?? cfg.maxSteps ?? 25,
     signal,
     focus: req.focus,
+    cdp: req.cdp,
   });
   let saved = null;
-  if (req.save && result.status === 'done') saved = saveRecipe(req.save, req.task, req.vars ?? {}, steps, req.focus);
+  if (req.save && result.status === 'done') saved = saveRecipe(req.save, req.task, req.vars ?? {}, steps, { focus: req.focus, cdp: req.cdp });
   return { ...result, usedGPT: true, steps: steps.length, saved, usage, durationMs: Date.now() - t0 };
 }
 

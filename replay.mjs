@@ -17,7 +17,7 @@ if (opts.list) {
   process.exit(0);
 }
 if (!opts.text) {
-  console.error('用法: node replay.mjs NAME [--var k=v ...] [--focus 窗口标题] [--heal] [--no-fallback] [--check-expect]  |  node replay.mjs --list');
+  console.error('用法: node replay.mjs NAME [--var k=v ...] [--cdp 标签页网址关键字 | --focus 窗口标题] [--heal] [--no-fallback] [--check-expect]  |  node replay.mjs --list');
   process.exit(1);
 }
 
@@ -33,6 +33,7 @@ const r = await runRecipe({
   maxSteps: opts['max-steps'] ? Number(opts['max-steps']) : undefined,
   signal: abort.signal,
   focus: opts.focus,
+  cdp: opts.cdp,
 });
 if (r.usedGPT) console.log(`\n[${r.status}] ${r.answer}`);
 process.exit(r.status === 'done' ? 0 : 1);

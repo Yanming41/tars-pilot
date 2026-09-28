@@ -1,8 +1,9 @@
 // 模板的保存 / 列出 / 回放（replay.mjs 命令行和 server.mjs 接口共用）
 import { readFileSync, writeFileSync, readdirSync, copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { cfg, here, fillVars, templatize, capture, isChanged, runStep, askGrounder, describeStep, sleep, focusWindow } from './lib.mjs';
+import { cfg, here, fillVars, templatize, capture, isChanged, runStep, askGrounder, describeStep, sleep, focusWindow, osDriver } from './lib.mjs';
 import { runAgent } from './planner.mjs';
+import { CdpDriver } from './cdp.mjs';
 
 export const recipesDir = join(here, 'recipes');
 const recipeFile = (name) => {
@@ -16,7 +17,7 @@ export function listRecipes() {
     .filter((f) => f.endsWith('.json') && !f.endsWith('.bak.json'))
     .map((f) => {
       const r = JSON.parse(readFileSync(join(recipesDir, f), 'utf-8'));
-      return { name: r.name, task: r.task, vars: r.vars, focus: r.focus, steps: r.steps.length, createdAt: r.createdAt, updatedAt: r.updatedAt };
+      return { name: r.name, task: r.task, vars: r.vars, focus: r.focus, cdp: r.cdp, steps: r.steps.length, createdAt: r.createdAt, updatedAt: r.updatedAt };
     });
 }
 
@@ -25,8 +26,8 @@ export function loadRecipe(name) {
 }
 
 // 把 runAgent 实际执行的步骤存成模板；0 步不存。返回保存路径或 null
-// focus：回放前要切到前台的窗口标题关键字（录制时用了 --focus 就一起存下来）
-export function saveRecipe(name, taskTemplate, vars, steps, focus) {
+// target：{ focus, cdp }——回放时用哪个驱动/窗口（录制时用了 --focus / --cdp 就一起存下来）
+export function saveRecipe(name, taskTemplate, vars, steps, { focus, cdp } = {}) {
   if (!steps.length) return null;
   mkdirSync(recipesDir, { recursive: true });
   const file = recipeFile(name);
@@ -35,6 +36,7 @@ export function saveRecipe(name, taskTemplate, vars, steps, focus) {
     task: taskTemplate, // 保留 {{变量}}
     vars, // 录制时用的值，回放时不传就用这些
     ...(focus ? { focus } : {}),
+    ...(cdp ? { cdp } : {}),
     createdAt: new Date().toISOString(),
     steps: steps.map((st) => templatize(st, vars)),
   };
@@ -53,7 +55,8 @@ async function expectHolds(shot, expect) {
  * 某步执行后界面没变化（或 expect 检查不通过）就交给 GPT 从当前画面接着做。
  * 返回 { status: 'done'|'fail'|'cancelled', answer, usedGPT, failedStep, reason, durationMs, healed }
  */
-export async function runRecipe({ name, vars = {}, fallback = true, heal = false, checkExpect, maxSteps, signal, focus }) {
+// cdp / focus 不传就用模板里存的；cdp 优先（CDP 驱动不动真实鼠标）
+export async function runRecipe({ name, vars = {}, fallback = true, heal = false, checkExpect, maxSteps, signal, focus, cdp }) {
   const recipe = loadRecipe(name);
   const allVars = { ...recipe.vars, ...vars };
   const task = fillVars(recipe.task, allVars);
@@ -70,24 +73,34 @@ export async function runRecipe({ name, vars = {}, fallback = true, heal = false
   async function waitForChange(before) {
     const deadline = Date.now() + replayCfg.verifyTimeoutMs;
     for (;;) {
-      const after = await capture();
+      const after = await capture(driver);
       if (isChanged(before.thumb, after.thumb)) return after;
       if (Date.now() > deadline || signal?.aborted) return null;
       await sleep(1000);
     }
   }
 
+  const cdpTarget = cdp ?? recipe.cdp;
   const focusTitle = focus ?? recipe.focus;
-  if (focusTitle) {
-    try {
+  let driver = osDriver;
+  try {
+    if (cdpTarget) {
+      driver = await CdpDriver.connect(cdpTarget);
+    } else if (focusTitle) {
       await focusWindow(focusTitle);
       await sleep(500);
-    } catch (e) {
-      return finish({ status: 'fail', answer: e.message, reason: e.message });
     }
+  } catch (e) {
+    return finish({ status: 'fail', answer: e.message, reason: e.message });
+  }
+  try {
+    return await replaySteps();
+  } finally {
+    await driver.close();
   }
 
-  let shot = await capture();
+  async function replaySteps() {
+  let shot = await capture(driver);
   let failedAt = -1;
   let reason = '';
   for (let i = 0; i < steps.length; i++) {
@@ -95,7 +108,7 @@ export async function runRecipe({ name, vars = {}, fallback = true, heal = false
     const st = steps[i];
     console.log(`\n[step ${i + 1}/${steps.length}] (+${secs()}s) ${describeStep(st)}`);
     try {
-      await runStep(shot, st);
+      await runStep(shot, st, driver);
     } catch (e) {
       failedAt = i;
       reason = `执行出错：${e.message}`;
@@ -103,7 +116,7 @@ export async function runRecipe({ name, vars = {}, fallback = true, heal = false
     }
     let after;
     if (st.action === 'wait' || st.noChangeOk) {
-      after = await capture();
+      after = await capture(driver);
     } else {
       after = await waitForChange(shot);
       if (!after) {
@@ -137,7 +150,7 @@ export async function runRecipe({ name, vars = {}, fallback = true, heal = false
   const done = steps.slice(0, failedAt).map((st, k) => `${k + 1}. ${describeStep(st)}`).join('\n');
   const context = `这个任务之前一直按固定步骤自动执行。已经完成的步骤：\n${done || '（无）'}\n第 ${failedAt + 1} 步「${describeStep(steps[failedAt])}」出了问题：${reason}。\n请根据当前屏幕状态判断实际进展，从这里继续把任务完成（之前的步骤不用重做，除非屏幕显示它们没有生效）。`;
   console.log('交给 GPT 规划器继续...');
-  const { result, steps: gptSteps } = await runAgent({ task, context, maxSteps: maxSteps ?? cfg.maxSteps ?? 25, signal });
+  const { result, steps: gptSteps } = await runAgent({ task, context, maxSteps: maxSteps ?? cfg.maxSteps ?? 25, signal, driver });
   console.log(`\n[${result.status}] (+${secs()}s) ${result.answer}`);
 
   let healed = false;
@@ -154,4 +167,5 @@ export async function runRecipe({ name, vars = {}, fallback = true, heal = false
     console.log(`模板已更新（旧版备份为 ${recipe.name}.bak.json）：${updated.steps.length} 步`);
   }
   return finish({ status: result.status, answer: result.answer, usedGPT: true, failedStep: failedAt + 1, reason, healed });
+  }
 }

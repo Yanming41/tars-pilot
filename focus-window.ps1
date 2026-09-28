@@ -1,7 +1,9 @@
 ﻿# 把标题包含指定文字的顶层窗口切到前台（最小化的会先还原）。
-# 用法: pwsh -NoProfile -File focus-window.ps1 -Title "小红书" [-List]
+# 用法: powershell -NoProfile -File focus-window.ps1 -Title "小红书" [-List] [-Background]
+#   -Background：不切到前台；如果窗口被最小化了，还原它但压到所有窗口最底层（不抢焦点、不挡你的窗口）。
+#                给 CDP 驱动用：Chrome 最小化时不渲染，截图会超时
 # Windows 默认不允许后台程序抢焦点，这里先模拟一下 Alt 键再 SetForegroundWindow（常见绕法）。
-param([string]$Title = "", [switch]$List)
+param([string]$Title = "", [switch]$List, [switch]$Background)
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 Add-Type @"
 using System;
@@ -17,6 +19,7 @@ public static class TpWin {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint f);
   [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e);
   public static List<KeyValuePair<IntPtr, string>> List() {
     var r = new List<KeyValuePair<IntPtr, string>>();
@@ -42,5 +45,10 @@ $wins = [TpWin]::List()
 if ($List) { $wins | ForEach-Object { $_.Value }; exit 0 }
 $hit = $wins | Where-Object { $_.Value -like "*$Title*" } | Select-Object -First 1
 if (-not $hit) { Write-Output "NOT_FOUND"; exit 2 }
+if ($Background) {
+  if ([TpWin]::IsIconic($hit.Key)) { [void][TpWin]::ShowWindow($hit.Key, 4) }   # SW_SHOWNOACTIVATE
+  [void][TpWin]::SetWindowPos($hit.Key, [IntPtr]1, 0, 0, 0, 0, 0x0013)        # HWND_BOTTOM | NOSIZE | NOMOVE | NOACTIVATE
+  Write-Output "OK $($hit.Value)"; exit 0
+}
 if ([TpWin]::Focus($hit.Key)) { Write-Output "OK $($hit.Value)"; exit 0 }
 Write-Output "FAILED $($hit.Value)"; exit 1
