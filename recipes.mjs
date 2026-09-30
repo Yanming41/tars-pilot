@@ -17,7 +17,7 @@ export function listRecipes() {
     .filter((f) => f.endsWith('.json') && !f.endsWith('.bak.json'))
     .map((f) => {
       const r = JSON.parse(readFileSync(join(recipesDir, f), 'utf-8'));
-      return { name: r.name, task: r.task, vars: r.vars, focus: r.focus, cdp: r.cdp, steps: r.steps.length, createdAt: r.createdAt, updatedAt: r.updatedAt };
+      return { name: r.name, task: r.task, vars: r.vars, focus: r.focus, cdp: r.cdp, browser: r.browser, steps: r.steps.length, createdAt: r.createdAt, updatedAt: r.updatedAt };
     });
 }
 
@@ -26,8 +26,8 @@ export function loadRecipe(name) {
 }
 
 // 把 runAgent 实际执行的步骤存成模板；0 步不存。返回保存路径或 null
-// target：{ focus, cdp }——回放时用哪个驱动/窗口（录制时用了 --focus / --cdp 就一起存下来）
-export function saveRecipe(name, taskTemplate, vars, steps, { focus, cdp } = {}) {
+// target：{ focus, cdp, browser }——回放时用哪个驱动/窗口/浏览器（录制时用了就一起存下来）
+export function saveRecipe(name, taskTemplate, vars, steps, { focus, cdp, browser } = {}) {
   if (!steps.length) return null;
   mkdirSync(recipesDir, { recursive: true });
   const file = recipeFile(name);
@@ -37,6 +37,7 @@ export function saveRecipe(name, taskTemplate, vars, steps, { focus, cdp } = {})
     vars, // 录制时用的值，回放时不传就用这些
     ...(focus ? { focus } : {}),
     ...(cdp ? { cdp } : {}),
+    ...(cdp && browser ? { browser } : {}),
     createdAt: new Date().toISOString(),
     steps: steps.map((st) => templatize(st, vars)),
   };
@@ -56,7 +57,7 @@ async function expectHolds(shot, expect) {
  * 返回 { status: 'done'|'fail'|'cancelled', answer, usedGPT, failedStep, reason, durationMs, healed }
  */
 // cdp / focus 不传就用模板里存的；cdp 优先（CDP 驱动不动真实鼠标）
-export async function runRecipe({ name, vars = {}, fallback = true, heal = false, checkExpect, maxSteps, signal, focus, cdp }) {
+export async function runRecipe({ name, vars = {}, fallback = true, heal = false, checkExpect, maxSteps, signal, focus, cdp, browser }) {
   const recipe = loadRecipe(name);
   const allVars = { ...recipe.vars, ...vars };
   const task = fillVars(recipe.task, allVars);
@@ -85,7 +86,7 @@ export async function runRecipe({ name, vars = {}, fallback = true, heal = false
   let driver = osDriver;
   try {
     if (cdpTarget) {
-      driver = await CdpDriver.connect(cdpTarget);
+      driver = await CdpDriver.connect(cdpTarget, browser ?? recipe.browser);
     } else if (focusTitle) {
       await focusWindow(focusTitle);
       await sleep(500);

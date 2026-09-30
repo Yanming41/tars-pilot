@@ -61,6 +61,8 @@ node replay.mjs --list
 | 系统 | 默认；`--focus 窗口标题` 先切到前台 | 截整个屏幕；nut-js 真实鼠标键盘 | 桌面软件、非 Chrome 程序 |
 
 CDP 驱动要点：
+- **自动化专用浏览器**：`powershell -File launch-browser.ps1`（默认 Edge、端口 9223、资料在 `%USERPROFILE%\automation-browser\edge`；`-Browser chrome -Port 9224` 也行）。Chrome/Edge 136+ 不允许对日常默认资料开调试端口，所以自动化用一个单独资料：在里面登录一次（Edge 可登录微软账号同步密码/地址/收藏夹），之后所有网站都在这一个实例里操作。
+- 选浏览器：`--browser edge` / 请求里 `"browser": "edge"`（`chrome`=9222 默认、`edge`=9223，`config.json` 的 `browsers` 可加别名，或直接写 `http://127.0.0.1:端口`）；模板会记住。
 - Chrome 要以 `--remote-debugging-port=9222` 启动，并**建议加** `--disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`（否则窗口被挡住/最小化时 Chrome 不出新画面，截图会超时）。
 - 驱动连接时固定视口为 1280×800（`config.json` 的 `cdpViewport` 可改），布局不随窗口大小变化；退出时还原。
 - Chrome 窗口放在其他窗口后面即可，**别最小化**：最小化时截图偶尔超时，驱动会重试，并把窗口还原（不抢焦点）。

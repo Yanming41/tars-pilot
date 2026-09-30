@@ -39,10 +39,20 @@ function keyDef(k) {
   throw new Error(`CDP 模式不支持的按键: ${k}`);
 }
 
+// browser：浏览器名（config.json 的 browsers 里配，默认 chrome=9222、edge=9223）或直接给 http://host:port
+export function cdpEndpointFor(browser) {
+  if (!browser) return cfg.cdpEndpoint ?? 'http://127.0.0.1:9222';
+  if (/^https?:\/\//.test(browser)) return browser.replace(/\/$/, '');
+  const known = { chrome: 'http://127.0.0.1:9222', edge: 'http://127.0.0.1:9223', ...cfg.browsers };
+  if (!known[browser]) throw new Error(`不认识的浏览器「${browser}」，可用: ${Object.keys(known).join(', ')}，或直接给 http://127.0.0.1:端口`);
+  return known[browser];
+}
+
 export class CdpDriver {
   kind = 'cdp';
 
-  static async connect(match, endpoint = cfg.cdpEndpoint ?? 'http://127.0.0.1:9222') {
+  static async connect(match, browser) {
+    const endpoint = cdpEndpointFor(browser);
     let list;
     try {
       list = await (await fetch(`${endpoint}/json/list`, { signal: AbortSignal.timeout(5000) })).json();
@@ -51,7 +61,7 @@ export class CdpDriver {
     }
     const pages = list.filter((t) => t.type === 'page');
     const page = pages.find((t) => t.url.includes(match)) ?? pages.find((t) => t.title.includes(match));
-    if (!page) throw new Error(`Chrome 里没有网址或标题包含「${match}」的标签页`);
+    if (!page) throw new Error(`${endpoint} 的浏览器里没有网址或标题包含「${match}」的标签页`);
     const d = new CdpDriver();
     await d.#open(page.webSocketDebuggerUrl);
     d.target = { title: page.title, url: page.url };
@@ -60,7 +70,7 @@ export class CdpDriver {
     d.viewport = { width: 1280, height: 800, deviceScaleFactor: 1, ...cfg.cdpViewport };
     await d.setViewport();
     await d.send('Page.setWebLifecycleState', { state: 'active' }).catch(() => {});
-    console.log(`  CDP 接管标签页: ${page.title}`);
+    console.log(`  CDP 接管标签页: ${page.title}（${endpoint}）`);
     return d;
   }
 

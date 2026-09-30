@@ -41,18 +41,19 @@ ${context ? `\n补充情况：${context}\n` : ''}
 
 /**
  * GPT 规划 + UI-TARS 定位。
- *   cdp：Chrome 标签页的网址/标题关键字 → 用 CDP 驱动（不动真实鼠标）；不给就用系统驱动（整个屏幕 + 真实鼠标）
+ *   cdp：浏览器标签页的网址/标题关键字 → 用 CDP 驱动（不动真实鼠标）；不给就用系统驱动（整个屏幕 + 真实鼠标）
+ *   browser：cdp 连哪个浏览器（chrome / edge / http://127.0.0.1:端口），默认 chrome
  *   focus：系统驱动下，开始前先把标题包含这段文字的窗口切到前台
  *   driver：直接传一个已经连好的驱动（模板回放兜底时复用），传了就不再按 cdp/focus 创建
  * 返回 { result: {status, answer}, steps: [已执行的动作（统一步骤格式，含 expect）], usage }
  */
-export async function runAgent({ task, context = '', maxSteps = cfg.maxSteps ?? 25, signal, focus, cdp, driver, workDir = join(here, '.planner-work') }) {
+export async function runAgent({ task, context = '', maxSteps = cfg.maxSteps ?? 25, signal, focus, cdp, browser, driver, workDir = join(here, '.planner-work') }) {
   const plannerCfg = { effort: 'low', screenshotWidth: 1280, ...cfg.planner };
   rmSync(workDir, { recursive: true, force: true });
   mkdirSync(workDir, { recursive: true });
 
   const ownDriver = !driver;
-  if (!driver) driver = cdp ? await CdpDriver.connect(cdp) : osDriver;
+  if (!driver) driver = cdp ? await CdpDriver.connect(cdp, browser) : osDriver;
   try {
     if (driver.kind === 'os' && focus) {
       await focusWindow(focus);

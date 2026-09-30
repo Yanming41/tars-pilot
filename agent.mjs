@@ -9,13 +9,14 @@
 //       node agent.mjs --save bing-search --var keyword=UI-TARS "打开Chrome，访问 bing.com，搜索 {{keyword}}"
 //       --focus 小红书：开始前先把标题包含「小红书」的窗口切到前台（存模板时一起记下，回放会自动切）
 //       --cdp xiaohongshu.com：改用 CDP 驱动，只操作 Chrome 里网址包含它的标签页，不动你的真实鼠标
+//       --browser edge：CDP 连哪个浏览器（chrome=9222 默认 / edge=9223 / http://127.0.0.1:端口）
 import { cfg, parseArgs, fillVars } from './lib.mjs';
 import { runAgent } from './planner.mjs';
 import { saveRecipe } from './recipes.mjs';
 
 const opts = parseArgs(process.argv.slice(2));
 if (!opts.text) {
-  console.error('用法: node agent.mjs [--max-steps N] [--cdp 标签页网址关键字 | --focus 窗口标题] [--save NAME] [--var k=v ...] "你的任务"');
+  console.error('用法: node agent.mjs [--max-steps N] [--cdp 标签页网址关键字 [--browser edge] | --focus 窗口标题] [--save NAME] [--var k=v ...] "你的任务"');
   process.exit(1);
 }
 const task = fillVars(opts.text, opts.vars);
@@ -30,6 +31,7 @@ const { result, steps } = await runAgent({
   signal: abort.signal,
   focus: opts.focus,
   cdp: opts.cdp,
+  browser: opts.browser,
 });
 console.log(`\n[${result.status}] (+${((Date.now() - t0) / 1000).toFixed(1)}s) ${result.answer}`);
 
@@ -37,7 +39,7 @@ if (opts.save) {
   if (result.status !== 'done') {
     console.log('任务没有成功完成，不保存模板');
   } else {
-    const file = saveRecipe(opts.save, opts.text, opts.vars, steps, { focus: opts.focus, cdp: opts.cdp });
+    const file = saveRecipe(opts.save, opts.text, opts.vars, steps, { focus: opts.focus, cdp: opts.cdp, browser: opts.browser });
     console.log(file ? `模板已保存: ${file}（${steps.length} 步）` : '没有执行任何动作（屏幕一开始就满足任务），不保存模板；换个起始状态或变量值再录');
   }
 }
