@@ -38,8 +38,9 @@ wsl -d Ubuntu --cd . -- bash ./setup-wsl.sh
 ## 使用
 
 ```powershell
-# 终端 1：启动本地定位模型（首次加载约 1-2 分钟，窗口别关）
-powershell -File start-server.ps1
+# 一键启动模型服务 + 本地接口（各开一个最小化窗口；已经在跑的会跳过）
+powershell -File start-all.ps1
+# 或者分别手动启动：start-server.ps1（模型，:8000）、node server.mjs（接口，:8765）
 # 检查：curl http://127.0.0.1:8000/v1/models
 
 # 终端 2：下任务（执行期间会接管鼠标键盘，Ctrl+C 停止）
