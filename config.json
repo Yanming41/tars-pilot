@@ -9,5 +9,8 @@
     "effort": "low",
     "screenshotWidth": 1280
   },
-  "maxNoChange": 4
+  "maxNoChange": 4,
+  "server": {
+    "modelIdleMinutes": 20
+  }
 }

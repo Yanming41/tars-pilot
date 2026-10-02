@@ -17,7 +17,10 @@
 //   POST /runs/:id/cancel          取消（排队中的直接移除，执行中的会在当前步骤后停下）
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { cfg, fillVars } from './lib.mjs';
+import { spawn, execFileSync } from 'node:child_process';
+import { mkdirSync, openSync } from 'node:fs';
+import { join } from 'node:path';
+import { cfg, fillVars, here } from './lib.mjs';
 import { runAgent } from './planner.mjs';
 import { listRecipes, loadRecipe, runRecipe, saveRecipe } from './recipes.mjs';
 
@@ -37,6 +40,63 @@ for (const level of ['log', 'error']) {
     }
   };
 }
+
+// ---------- 模型服务（WSL 里的 vLLM）生命周期：按需启动、空闲自动停止、接口退出时一起停 ----------
+// 模型常驻会一直占着 ~13.6GB 显存；所以有任务时才拉起来（首次加载 1-2 分钟），空闲 modelIdleMinutes 分钟后停掉。
+// 关闭本接口的窗口（Windows 会给 node 发 SIGHUP）、Ctrl+C、stop-all.ps1 都会顺带停掉 vLLM。
+const modelCfg = { wslDistro: 'Ubuntu', modelIdleMinutes: 20, ...cfg.server };
+const modelUrl = `${cfg.baseURL ?? 'http://127.0.0.1:8000/v1'}/models`;
+const logsDir = join(here, 'logs');
+let modelStarting = null;
+let lastActivity = Date.now();
+
+async function grounderOnline() {
+  try {
+    const r = await fetch(modelUrl, { signal: AbortSignal.timeout(2000) });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+function ensureModel() {
+  if (modelStarting) return modelStarting;
+  modelStarting = (async () => {
+    if (await grounderOnline()) return;
+    mkdirSync(logsDir, { recursive: true });
+    const log = openSync(join(logsDir, 'model.log'), 'a');
+    console.log(`[model] 启动本地 UI-TARS 模型（WSL ${modelCfg.wslDistro} + vLLM），首次加载约 1-2 分钟，日志: logs/model.log`);
+    const child = spawn('wsl', ['-d', modelCfg.wslDistro, '--cd', here, '--', 'bash', './serve.sh'], { stdio: ['ignore', log, log], windowsHide: true });
+    child.unref();
+    const deadline = Date.now() + 5 * 60_000;
+    while (!(await grounderOnline())) {
+      if (child.exitCode !== null) throw new Error(`模型服务启动失败（退出码 ${child.exitCode}），看 logs/model.log`);
+      if (Date.now() > deadline) throw new Error('模型服务 5 分钟内没有就绪，看 logs/model.log');
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    console.log('[model] 模型就绪');
+  })().finally(() => {
+    modelStarting = null;
+  });
+  return modelStarting;
+}
+
+// 同步版本：进程退出时也能用（exit / SIGHUP 处理里不能 await）
+function stopModelSync(reason) {
+  try {
+    execFileSync('wsl', ['-d', modelCfg.wslDistro, '--', 'pkill', '-f', 'vllm serve'], { stdio: 'ignore', windowsHide: true, timeout: 15000 });
+    console.log(`[model] 已停止模型服务（${reason}），显存已释放`);
+  } catch {
+    // pkill 没找到进程会返回非 0，忽略
+  }
+}
+
+setInterval(async () => {
+  const idleMin = (Date.now() - lastActivity) / 60_000;
+  if (!current && !queue.length && !modelStarting && modelCfg.modelIdleMinutes > 0 && idleMin >= modelCfg.modelIdleMinutes && (await grounderOnline())) {
+    stopModelSync(`空闲 ${Math.round(idleMin)} 分钟`);
+  }
+}, 60_000).unref();
 
 const view = ({ abort, waiters, ...r }) => r;
 
@@ -85,7 +145,9 @@ async function pump() {
   current.status = 'running';
   current.startedAt = new Date().toISOString();
   const run = current;
+  lastActivity = Date.now();
   try {
+    await ensureModel();
     const result = await execute(run);
     finish(run, run.abort.signal.aborted ? 'cancelled' : result.status, result);
   } catch (e) {
@@ -93,6 +155,7 @@ async function pump() {
     finish(run, run.abort.signal.aborted ? 'cancelled' : 'error', { status: 'error', answer: e.message });
   } finally {
     current = null;
+    lastActivity = Date.now();
     // 只保留最近 100 个任务
     for (const id of [...runs.keys()].slice(0, Math.max(0, runs.size - 100))) if (runs.get(id).finishedAt) runs.delete(id);
     pump();
@@ -133,14 +196,6 @@ function submit(body) {
   return run;
 }
 
-async function grounderOnline() {
-  try {
-    const r = await fetch(`${cfg.baseURL ?? 'http://127.0.0.1:8000/v1'}/models`, { signal: AbortSignal.timeout(2000) });
-    return r.ok;
-  } catch {
-    return false;
-  }
-}
 
 function send(res, code, obj) {
   const body = JSON.stringify(obj, null, 2);
@@ -174,7 +229,8 @@ const server = http.createServer(async (req, res) => {
     const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
 
     if (req.method === 'GET' && url.pathname === '/health') {
-      return send(res, 200, { ok: true, grounder: await grounderOnline(), busy: !!current, queued: queue.length });
+      const up = await grounderOnline();
+      return send(res, 200, { ok: true, grounder: up, model: up ? 'running' : modelStarting ? 'starting' : `stopped（有任务时自动启动，空闲 ${modelCfg.modelIdleMinutes} 分钟自动停止）`, busy: !!current, queued: queue.length });
     }
     if (req.method === 'GET' && parts[0] === 'recipes') {
       if (parts.length === 1) return send(res, 200, listRecipes());
@@ -228,8 +284,11 @@ server.listen(serverCfg.port, serverCfg.host, () => {
   console.log(`tars-pilot API: http://${serverCfg.host}:${serverCfg.port}  （模板 ${listRecipes().length} 个，token ${serverCfg.token ? '已启用' : '未启用'}）`);
 });
 
-process.on('SIGINT', () => {
-  current?.abort.abort();
-  server.close();
-  process.exit(0);
-});
+// 退出时顺带停掉模型：Ctrl+C（SIGINT）、关闭窗口（Windows 上是 SIGHUP，约 10 秒后强制结束）、stop-all.ps1（SIGTERM / 直接结束进程）
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+  process.on(sig, () => {
+    current?.abort.abort();
+    stopModelSync(`接口退出（${sig}）`);
+    process.exit(0);
+  });
+}

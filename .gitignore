@@ -11,3 +11,4 @@ __pycache__/
 *.pyc
 # 临时调试脚本
 _*.mjs
+logs/

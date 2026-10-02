@@ -38,9 +38,10 @@ wsl -d Ubuntu --cd . -- bash ./setup-wsl.sh
 ## 使用
 
 ```powershell
-# 一键启动模型服务 + 本地接口（各开一个最小化窗口；已经在跑的会跳过）
-powershell -File start-all.ps1
-# 或者分别手动启动：start-server.ps1（模型，:8000）、node server.mjs（接口，:8765）
+# 启动：只开一个最小化窗口「tars-pilot — 关闭此窗口 = 停止全部服务」（本地接口 :8765）；已经在跑会跳过
+powershell -File start-all.ps1          # 加 -Warm 顺便把模型提前加载好
+# 停止：接口 + 模型全停、释放显存、关掉窗口（也可以直接关那个窗口）
+powershell -File stop-all.ps1
 # 检查：curl http://127.0.0.1:8000/v1/models
 
 # 终端 2：下任务（执行期间会接管鼠标键盘，Ctrl+C 停止）
@@ -136,6 +137,7 @@ if r["status"] == "done":
 - `maxSteps`、`maxNoChange`、`minChangedPixels`、`settleMs`（每步动作后等待）、`debug`
 - `replay.verifyTimeoutMs`、`replay.checkExpect`
 - `server.host`（默认 127.0.0.1）、`server.port`（默认 8765）、`server.token`（默认空，不校验）
+- `server.modelIdleMinutes`（默认 20，0 = 不自动停）、`server.wslDistro`（默认 Ubuntu）：模型按需启动 / 空闲自动停止；日志在 `logs/model.log`
 
 ## 实测（RTX 3080 Laptop 16GB，Windows 11，175% 缩放）
 
