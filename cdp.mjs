@@ -65,6 +65,7 @@ export class CdpDriver {
     const d = new CdpDriver();
     await d.#open(page.webSocketDebuggerUrl);
     d.target = { title: page.title, url: page.url };
+    d.endpoint = endpoint;
     // 让页面始终以为自己有焦点、处于活跃状态，窗口被挡住也照常渲染和响应输入
     await d.send('Emulation.setFocusEmulationEnabled', { enabled: true });
     d.viewport = { width: 1280, height: 800, deviceScaleFactor: 1, ...cfg.cdpViewport };
@@ -135,28 +136,54 @@ export class CdpDriver {
       title = (await this.send('Runtime.evaluate', { expression: 'document.title', returnByValue: true }, 3000)).result.value;
     } catch {}
     if (!title) return;
-    await new Promise((resolve) => execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(here, 'focus-window.ps1'), '-Title', title, '-Background'],
+    // -Port：只认这个调试端口的浏览器进程的窗口，绝不碰用户日常用的浏览器（登录同一个微软账号后窗口标题长得一样）
+    const port = new URL(this.endpoint).port;
+    await new Promise((resolve) => execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(here, 'focus-window.ps1'), '-Title', title, '-Background', '-Port', port],
       { windowsHide: true, timeout: 15000 }, () => resolve()));
   }
 
   // 截当前视口（只有网页内容，没有浏览器地址栏/标签栏）。坐标单位：截图像素；dpr = 截图像素 / CSS 像素
+  // 截图前确认页面真的处在我们设定的视口（宽、高、dpr）里；不对（被清掉了，或还停在超时重试时抖动的 +1px 状态）就设回去、等重新布局。
+  // 2026-10-02 修：以前每次截图后都重设视口、dpr 用不含滚动条的 cssVisualViewport 宽度去算（偏 1.2%），
+  // 窗口被挡住频繁重试时会截到过渡状态的画面——截图和实际页面对不上，点偏、看起来"忽然放大"。
+  async #ensureViewport() {
+    const v = this.viewport;
+    let cur = null;
+    try {
+      cur = JSON.parse((await this.send('Runtime.evaluate', { expression: 'JSON.stringify([innerWidth, innerHeight, devicePixelRatio])', returnByValue: true }, 5000)).result.value);
+    } catch {}
+    if (cur && cur[0] === v.width && cur[1] === v.height && Math.abs(cur[2] - v.deviceScaleFactor) < 0.01) return;
+    await this.setViewport(false);
+    await sleep(300);
+  }
+
   async grab() {
-    let data;
+    const v = this.viewport;
+    const expectW = Math.round(v.width * v.deviceScaleFactor);
+    const expectH = Math.round(v.height * v.deviceScaleFactor);
     for (let attempt = 1; ; attempt++) {
+      await this.#ensureViewport();
+      let data;
       try {
         ({ data } = await this.send('Page.captureScreenshot', { format: 'png' }, 8000));
-        break;
       } catch (e) {
-        if (!/超时/.test(e.message) || attempt >= 4) throw new Error(`${e.message}（Chrome 窗口是不是被最小化了？放在其他窗口后面即可，别最小化）`);
+        if (!/超时/.test(e.message) || attempt >= 5) throw new Error(`${e.message}（浏览器窗口是不是被最小化了？放在其他窗口后面即可，别最小化）`);
         if (attempt === 2) await this.#unminimize();
-        await this.setViewport(attempt % 2 === 1);
+        await this.setViewport(true); // 抖动 1px 强制出一帧；下一轮 #ensureViewport 会设回去
+        await sleep(200);
+        continue;
       }
+      const img = await Jimp.read(Buffer.from(data, 'base64'));
+      // 尺寸和视口对不上 = 截到了过渡帧，丢掉重截
+      if (img.bitmap.width !== expectW || img.bitmap.height !== expectH) {
+        if (attempt >= 5) throw new Error(`截图尺寸 ${img.bitmap.width}x${img.bitmap.height} 和视口 ${expectW}x${expectH} 一直对不上`);
+        await this.setViewport(false);
+        await sleep(300);
+        continue;
+      }
+      this.dpr = v.deviceScaleFactor; // 截图像素 / CSS 像素，就是我们设的 deviceScaleFactor
+      return { img, scaleFactor: this.dpr };
     }
-    if (this.viewport) await this.setViewport(false);
-    const img = await Jimp.read(Buffer.from(data, 'base64'));
-    const { cssVisualViewport: vp } = await this.send('Page.getLayoutMetrics');
-    this.dpr = img.bitmap.width / vp.clientWidth;
-    return { img, scaleFactor: this.dpr };
   }
 
   #css(px, py) {
