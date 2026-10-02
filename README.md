@@ -106,6 +106,7 @@ node server.mjs      # 默认 http://127.0.0.1:8765；需要 start-server.ps1 �
 | `POST /runs` | 提交任务，默认等执行完再返回；加 `"wait": false` 立刻返回任务 id |
 | `GET /runs`、`GET /runs/:id` | 任务状态、结果（`result.answer / usedGPT / failedStep`）、执行日志（`log`） |
 | `POST /runs/:id/cancel` | 取消：排队中的直接移除，执行中的在当前步骤后停 |
+| `POST /model/warm`、`POST /model/stop` | 预加载 / 手动停止本地模型（任务来时会自动加载，平时不用调） |
 
 ```jsonc
 // 模板回放（失败时默认交给 GPT 兜底）
@@ -137,6 +138,7 @@ if r["status"] == "done":
 - `maxSteps`、`maxNoChange`、`minChangedPixels`、`settleMs`（每步动作后等待）、`debug`
 - `replay.verifyTimeoutMs`、`replay.checkExpect`
 - `server.host`（默认 127.0.0.1）、`server.port`（默认 8765）、`server.token`（默认空，不校验）
+- `server.modelStartTimeoutMinutes`（默认 10）：模型启动超时，超时会把它停干净再报错；已经有模型在加载时不会重复启动
 - `server.modelIdleMinutes`（默认 20，0 = 不自动停）、`server.wslDistro`（默认 Ubuntu）：模型按需启动 / 空闲自动停止；日志在 `logs/model.log`
 
 ## 实测（RTX 3080 Laptop 16GB，Windows 11，175% 缩放）

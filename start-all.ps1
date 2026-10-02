@@ -24,12 +24,12 @@ if (Test-Url "http://127.0.0.1:8765/health") {
 }
 
 if ($Warm -and -not (Test-Url "http://127.0.0.1:8000/v1/models")) {
-  # 提交一个不存在的模板不会触发加载，所以直接让接口跑 wsl：和接口内部用同一个启动方式
-  Start-Process wsl -WindowStyle Hidden -ArgumentList @('-d', 'Ubuntu', '--cd', $root, '--', 'bash', '-c', './serve.sh >> logs/model.log 2>&1')
-  Write-Output "正在预加载模型（1-2 分钟）..."
-  $deadline = (Get-Date).AddMinutes(5)
+  # 让接口去拉模型（和任务触发的是同一套逻辑：已经在加载就不重复启动）
+  Invoke-RestMethod -Method Post "http://127.0.0.1:8765/model/warm" -ContentType 'application/json' -Body '{}' | Out-Null
+  Write-Output "正在预加载模型（通常 1-2 分钟）..."
+  $deadline = (Get-Date).AddMinutes(10)
   while (-not (Test-Url "http://127.0.0.1:8000/v1/models")) {
-    if ((Get-Date) -gt $deadline) { Write-Output "模型 5 分钟内没有就绪，看 logs/model.log"; exit 1 }
+    if ((Get-Date) -gt $deadline) { Write-Output "模型 10 分钟内没有就绪，看 logs/model.log"; exit 1 }
     Start-Sleep -Seconds 3
   }
   Write-Output "模型就绪 (:8000)"

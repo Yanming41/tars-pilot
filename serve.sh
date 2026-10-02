@@ -6,10 +6,11 @@ cd "$TARS_HOME" && . .venv/bin/activate
 # WSL 里没有 nvcc，FlashInfer 采样器需要现场编译，关掉用 PyTorch 实现
 export VLLM_USE_FLASHINFER_SAMPLER=0
 # --limit-mm-per-prompt 里的宽高只影响启动时的显存预估，不影响实际图片处理（坐标换算不变）
+# "video": 0：我们不用视频；不关的话启动时要按"最大尺寸视频"做显存预估，冷启动会卡好几分钟
 exec vllm serve "$TARS_HOME/model" \
   --served-model-name ui-tars \
   --host 0.0.0.0 --port "${PORT:-8000}" \
   --max-model-len 32768 \
   --gpu-memory-utilization "${GPU_UTIL:-0.85}" \
-  --limit-mm-per-prompt '{"image": {"count": 5, "width": 2560, "height": 1600}}' \
+  --limit-mm-per-prompt '{"image": {"count": 5, "width": 2560, "height": 1600}, "video": 0}' \
   --max-num-seqs 2

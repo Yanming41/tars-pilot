@@ -59,19 +59,42 @@ async function grounderOnline() {
   }
 }
 
+// WSL 里有没有 vLLM 进程（正在加载的也算）
+function vllmRunning() {
+  try {
+    execFileSync('wsl', ['-d', modelCfg.wslDistro, '--', 'pgrep', '-f', 'vllm serve'], { stdio: 'ignore', windowsHide: true, timeout: 15000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 2026-10-02 修：以前超时只有 5 分钟、超时后不清理，下一个任务又拉起一个新的 vLLM，
+// 两个实例抢显存/内存，越来越慢、谁都起不来。现在：已经有 vLLM 在加载就等它，绝不重复启动；
+// 超时（默认 10 分钟）或进程中途退出就把它停干净再报错。
 function ensureModel() {
   if (modelStarting) return modelStarting;
   modelStarting = (async () => {
     if (await grounderOnline()) return;
     mkdirSync(logsDir, { recursive: true });
-    const log = openSync(join(logsDir, 'model.log'), 'a');
-    console.log(`[model] 启动本地 UI-TARS 模型（WSL ${modelCfg.wslDistro} + vLLM），首次加载约 1-2 分钟，日志: logs/model.log`);
-    const child = spawn('wsl', ['-d', modelCfg.wslDistro, '--cd', here, '--', 'bash', './serve.sh'], { stdio: ['ignore', log, log], windowsHide: true });
-    child.unref();
-    const deadline = Date.now() + 5 * 60_000;
+    if (vllmRunning()) {
+      console.log('[model] 已有模型服务在加载，等它就绪（日志: logs/model.log）');
+    } else {
+      const log = openSync(join(logsDir, 'model.log'), 'a');
+      console.log(`[model] 启动本地 UI-TARS 模型（WSL ${modelCfg.wslDistro} + vLLM），通常 1-2 分钟，日志: logs/model.log`);
+      spawn('wsl', ['-d', modelCfg.wslDistro, '--cd', here, '--', 'bash', './serve.sh'], { stdio: ['ignore', log, log], windowsHide: true }).unref();
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    const timeoutMin = modelCfg.modelStartTimeoutMinutes ?? 10;
+    const deadline = Date.now() + timeoutMin * 60_000;
+    let checks = 0;
     while (!(await grounderOnline())) {
-      if (child.exitCode !== null) throw new Error(`模型服务启动失败（退出码 ${child.exitCode}），看 logs/model.log`);
-      if (Date.now() > deadline) throw new Error('模型服务 5 分钟内没有就绪，看 logs/model.log');
+      // 每 30 秒确认一次进程还活着（pgrep 走 wsl 有点慢，不每轮都查）
+      if (++checks % 10 === 0 && !vllmRunning()) throw new Error('模型服务启动中途退出了，看 logs/model.log');
+      if (Date.now() > deadline) {
+        stopModelSync(`${timeoutMin} 分钟内没有就绪`);
+        throw new Error(`模型服务 ${timeoutMin} 分钟内没有就绪，已停止，看 logs/model.log`);
+      }
       await new Promise((r) => setTimeout(r, 3000));
     }
     console.log('[model] 模型就绪');
@@ -231,6 +254,16 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/health') {
       const up = await grounderOnline();
       return send(res, 200, { ok: true, grounder: up, model: up ? 'running' : modelStarting ? 'starting' : `stopped（有任务时自动启动，空闲 ${modelCfg.modelIdleMinutes} 分钟自动停止）`, busy: !!current, queued: queue.length });
+    }
+    if (req.method === 'POST' && url.pathname === '/model/warm') {
+      lastActivity = Date.now();
+      ensureModel().catch((e) => console.error(`[model] ${e.message}`));
+      return send(res, 202, { ok: true, model: (await grounderOnline()) ? 'running' : 'starting' });
+    }
+    if (req.method === 'POST' && url.pathname === '/model/stop') {
+      if (current || modelStarting) return send(res, 409, { error: '有任务在跑或模型正在启动，稍后再停' });
+      stopModelSync('手动停止');
+      return send(res, 200, { ok: true });
     }
     if (req.method === 'GET' && parts[0] === 'recipes') {
       if (parts.length === 1) return send(res, 200, listRecipes());
