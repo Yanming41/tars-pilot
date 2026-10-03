@@ -38,9 +38,9 @@ wsl -d Ubuntu --cd . -- bash ./setup-wsl.sh
 ## 使用
 
 ```powershell
-# 启动：只开一个最小化窗口「tars-pilot — 关闭此窗口 = 停止全部服务」（本地接口 :8765）；已经在跑会跳过
+# 启动：开一个可见的终端窗口「tars-pilot」（cmd.exe /k title tars-pilot && node server.mjs，本地接口 :8765）；已经在跑会直接返回
 powershell -File start-all.ps1          # 加 -Warm 顺便把模型提前加载好
-# 停止：接口 + 模型全停、释放显存、关掉窗口（也可以直接关那个窗口）
+# 停止：直接关掉 tars-pilot 窗口（接口 + 模型一起停、释放显存），或者在窗口外运行：
 powershell -File stop-all.ps1
 # 检查：curl http://127.0.0.1:8000/v1/models
 

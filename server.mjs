@@ -28,6 +28,7 @@ const serverCfg = { host: '127.0.0.1', port: 8765, token: '', ...cfg.server };
 const runs = new Map();
 const queue = [];
 let current = null;
+let shuttingDown = false;
 
 // 执行中的任务的输出同时记到它自己的日志里，接口可以取回
 for (const level of ['log', 'error']) {
@@ -62,7 +63,7 @@ async function grounderOnline() {
 // WSL 里有没有 vLLM 进程（正在加载的也算）
 function vllmRunning() {
   try {
-    execFileSync('wsl', ['-d', modelCfg.wslDistro, '--', 'pgrep', '-f', 'vllm serve'], { stdio: 'ignore', windowsHide: true, timeout: 15000 });
+    execFileSync('wsl', ['-d', modelCfg.wslDistro, '--', 'bash', '-c', "pgrep -f '[v]llm serve|[V]LLM::EngineCore' >/dev/null"], { stdio: 'ignore', windowsHide: true, timeout: 15000 });
     return true;
   } catch {
     return false;
@@ -104,13 +105,17 @@ function ensureModel() {
   return modelStarting;
 }
 
-// 同步版本：进程退出时也能用（exit / SIGHUP 处理里不能 await）
+// 同步版本：进程退出时也能用（SIGHUP 处理里不能 await）。
+// 直接 SIGKILL 主进程（vllm serve）和真正占显存的子进程（VLLM::EngineCore），进程立刻消失、显存立刻释放。
+// 模式写成 '[v]llm serve'：bash -c 自己的命令行里也有这串字，不加方括号 pkill 会先把自己的父进程 bash 杀掉，后面的命令就不执行了；
+// 4 秒超时：关窗口时 Windows 只给约 5 秒清理时间，超时宁可放弃也不能让整个退出流程被拖住。
 function stopModelSync(reason) {
   try {
-    execFileSync('wsl', ['-d', modelCfg.wslDistro, '--', 'pkill', '-f', 'vllm serve'], { stdio: 'ignore', windowsHide: true, timeout: 15000 });
+    execFileSync('wsl', ['-d', modelCfg.wslDistro, '--', 'bash', '-c', "pkill -KILL -f '[v]llm serve'; pkill -KILL -f '[V]LLM::EngineCore'; true"],
+      { stdio: 'ignore', windowsHide: true, timeout: 4000 });
     console.log(`[model] 已停止模型服务（${reason}），显存已释放`);
-  } catch {
-    // pkill 没找到进程会返回非 0，忽略
+  } catch (e) {
+    console.error(`[model] 停止模型服务时出错（${reason}）: ${e.message}`);
   }
 }
 
@@ -242,6 +247,7 @@ const server = http.createServer(async (req, res) => {
   try {
     // 这个接口能操控真实鼠标键盘：拒绝浏览器发来的请求（网页里的脚本都会带 Origin），
     // POST 只收 application/json（浏览器跨站发这种请求必须先预检，而我们不回 CORS 头）
+    if (shuttingDown) return send(res, 503, { error: '服务正在关闭' });
     if (req.headers.origin) return send(res, 403, { error: '不接受浏览器跨站请求' });
     if (serverCfg.token && req.headers.authorization !== `Bearer ${serverCfg.token}`) return send(res, 401, { error: '缺少或错误的 token' });
     if (req.method === 'POST' && !(req.headers['content-type'] ?? '').includes('application/json')) {
@@ -317,11 +323,17 @@ server.listen(serverCfg.port, serverCfg.host, () => {
   console.log(`tars-pilot API: http://${serverCfg.host}:${serverCfg.port}  （模板 ${listRecipes().length} 个，token ${serverCfg.token ? '已启用' : '未启用'}）`);
 });
 
-// 退出时顺带停掉模型：Ctrl+C（SIGINT）、关闭窗口（Windows 上是 SIGHUP，约 10 秒后强制结束）、stop-all.ps1（SIGTERM / 直接结束进程）
-for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
-  process.on(sig, () => {
-    current?.abort.abort();
-    stopModelSync(`接口退出（${sig}）`);
-    process.exit(0);
-  });
+// 服务和窗口绑定：关掉 tars-pilot 窗口时 Windows 给 node 发 SIGHUP，约 5 秒后强制结束进程。
+// 收到后：先停止接收新请求 → 取消正在跑和排队中的任务 → 停掉 WSL 里的 vLLM（≤4 秒）→ 退出。
+// Ctrl+C（SIGINT）、SIGTERM、Ctrl+Break（SIGBREAK）走同一套流程。stop-all.ps1 是直接结束进程，它自己会清 vLLM。
+function shutdown(sig) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n[shutdown] 收到 ${sig}：停止接收新请求，停掉模型服务后退出`);
+  server.close();
+  current?.abort.abort();
+  for (const r of queue.splice(0)) finish(r, 'cancelled', { status: 'cancelled', answer: '服务关闭' });
+  stopModelSync(`接口退出（${sig}）`);
+  process.exit(0);
 }
+for (const sig of ['SIGHUP', 'SIGINT', 'SIGTERM', 'SIGBREAK']) process.on(sig, () => shutdown(sig));
