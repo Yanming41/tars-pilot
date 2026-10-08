@@ -62,34 +62,68 @@ function describeTask(req) {
   return clip(plain(req.task || '(没有描述)'), 300);
 }
 
+const COLORS = { queued: 0x95a5a6, running: 0x3498db, done: 0x2ecc71, cancelled: 0xf1c40f, failed: 0xe74c3c };
+
+function progressBar(step, max) {
+  const filled = Math.max(0, Math.min(10, Math.round((step / Math.max(1, max)) * 10)));
+  return '▰'.repeat(filled) + '▱'.repeat(10 - filled);
+}
+
+/** 一个任务当前状态对应的 Discord 卡片(embed) */
 export function renderCard(run) {
   const req = run.request ?? {};
   const info = parseLog(run.log);
-  const head = [
-    `🖱️ **网页任务** · \`${String(run.id).slice(0, 8)}\`${req.caller ? ` · 来自 ${req.caller}` : ''}`,
-    `**任务**：${describeTask(req)}`,
-    `**网站**：${req.browser || 'chrome'} · ${req.cdp || '当前标签页'}`,
-  ];
   const startedAt = Date.parse(run.startedAt || run.createdAt || '') || Date.now();
+  const result = run.result ?? {};
+  const fields = [
+    { name: '网站', value: `${req.browser || 'chrome'} · ${req.cdp || '当前标签页'}`, inline: true },
+    { name: '来自', value: req.caller || '未注明', inline: true },
+  ];
+  let state;
+  let title;
 
-  if (run.status === 'queued') return [...head, '🕒 排队中：前面还有任务(鼠标键盘只有一套，只能一个个来)'].join('\n');
-  if (run.status === 'running') {
+  if (run.status === 'queued') {
+    state = 'queued';
+    title = '🕒 排队中';
+    fields.push({ name: '说明', value: '前面还有任务(鼠标键盘只有一套，只能一个个来)', inline: false });
+  } else if (run.status === 'running') {
+    state = 'running';
+    title = '⏳ 进行中';
     const max = info.totalSteps ?? req.maxSteps ?? DEFAULT_MAX_STEPS;
-    const stepText = info.step ? (info.totalSteps ? `第 ${info.step}/${max} 步` : `第 ${info.step} 步(最多 ${max} 步)`) : '准备中';
-    const lines = [...head, `⏳ 进行中 · ${stepText} · 已用 ${formatElapsed(Date.now() - startedAt)}`];
-    if (info.modelStarting && !info.step) lines.push('正在启动本地视觉模型，第一次要 1-2 分钟…');
-    if (info.progress) lines.push(`**进度**：${clip(plain(info.progress), 200)}`);
-    lines.push(...info.actions.slice(-3).map((a) => `• \`${clip(plain(a), 90)}\``));
-    return lines.join('\n');
+    const stepText = !info.step ? '准备中' : info.totalSteps ? `第 ${info.step}/${max} 步` : `第 ${info.step} 步(最多 ${max})`;
+    fields.push({ name: '进度', value: `${progressBar(info.step, max)} ${stepText}`, inline: true });
+    fields.push({ name: '已用', value: formatElapsed(Date.now() - startedAt), inline: true });
+    if (info.modelStarting && !info.step) fields.push({ name: '当前', value: '正在启动本地视觉模型，第一次要 1-2 分钟…', inline: false });
+    if (info.progress) fields.push({ name: '当前', value: clip(plain(info.progress), 300), inline: false });
+    const recent = info.actions.slice(-3).map((a) => `• \`${clip(plain(a), 90)}\``);
+    if (recent.length) fields.push({ name: '最近动作', value: recent.join('\n'), inline: false });
+  } else {
+    const took = formatElapsed(result.durationMs ?? Date.now() - startedAt);
+    const steps = result.steps ?? info.step;
+    const answer = clip(plain(result.answer || result.reason || ''), 1000);
+    if (run.status === 'done') {
+      state = 'done';
+      title = '✅ 完成';
+    } else if (run.status === 'cancelled') {
+      state = 'cancelled';
+      title = '⏹ 已取消';
+    } else {
+      state = 'failed';
+      title = '❌ 没完成';
+    }
+    fields.push({ name: '用时', value: took, inline: true });
+    if (steps) fields.push({ name: '步数', value: state === 'failed' ? `停在第 ${steps} 步` : `共 ${steps} 步`, inline: true });
+    if (answer) fields.push({ name: state === 'done' ? '结果' : state === 'cancelled' ? '说明' : '原因', value: answer, inline: false });
   }
 
-  const result = run.result ?? {};
-  const took = formatElapsed(result.durationMs ?? Date.now() - startedAt);
-  const steps = result.steps ?? info.step;
-  const answer = clip(plain(result.answer || result.reason || ''), 600);
-  if (run.status === 'done') return [...head, `✅ 完成 · 用时 ${took} · 共 ${steps} 步`, answer && `**结果**：${answer}`].filter(Boolean).join('\n');
-  if (run.status === 'cancelled') return [...head, `⏹ 已取消 · 用时 ${took}`, answer && `**说明**：${answer}`].filter(Boolean).join('\n');
-  return [...head, `❌ 没完成 · 用时 ${took}${steps ? ` · 停在第 ${steps} 步` : ''}`, answer && `**原因**：${answer}`].filter(Boolean).join('\n');
+  return {
+    title: `🖱️ 网页任务 · ${title}`,
+    description: describeTask(req),
+    color: COLORS[state],
+    fields,
+    footer: { text: `tars-pilot · ${String(run.id).slice(0, 8)}` },
+    timestamp: new Date(startedAt).toISOString(),
+  };
 }
 
 /** 返回 { onCreated, onLog, onFinished }；没有配置文件时返回 null(不播报)。三个回调都不会抛错。 */
@@ -105,24 +139,29 @@ export function createDiscordReporter(configPath = join(homedir(), '.discord_dm'
       ? { url: webhooks[mainChannelId], query: '' }
       : { url: webhooks[forumChannelId], query: `thread_id=${channelId}` };
 
-  const post = async (channelId, content, mention = false) => {
+  // payload：文字消息传字符串；卡片传 { embeds: [...] }
+  const toBody = (payload, mention) => ({
+    ...(typeof payload === 'string' ? { content: payload } : payload),
+    allowed_mentions: mention && ownerId ? { users: [ownerId] } : NO_MENTIONS,
+  });
+  const post = async (channelId, payload, mention = false) => {
     const t = target(channelId);
     const res = await fetch(`${t.url}?${['wait=true', t.query].filter(Boolean).join('&')}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, allowed_mentions: mention && ownerId ? { users: [ownerId] } : NO_MENTIONS }),
+      body: JSON.stringify(toBody(payload, mention)),
     });
-    if (!res.ok) throw new Error(`Discord webhook HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`Discord webhook HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
     return res.json();
   };
-  const edit = async (channelId, messageId, content) => {
+  const edit = async (channelId, messageId, payload) => {
     const t = target(channelId);
     const res = await fetch(`${t.url}/messages/${messageId}${t.query ? `?${t.query}` : ''}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, allowed_mentions: NO_MENTIONS }),
+      body: JSON.stringify(toBody(payload, false)),
     });
-    if (!res.ok) throw new Error(`Discord webhook HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`Discord webhook HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
   };
 
   // 每个任务一份播报状态；同一个任务的 Discord 操作串行执行，保证先发卡片再改卡片
@@ -140,11 +179,12 @@ export function createDiscordReporter(configPath = join(homedir(), '.discord_dm'
 
   const refresh = (run, st) =>
     enqueue(st, async () => {
-      const card = renderCard(run);
+      const embed = renderCard(run);
+      const card = JSON.stringify({ ...embed, timestamp: undefined }); // 只用来判断内容有没有变
       if (!st.messageId) {
-        st.messageId = (await post(st.channelId, card)).id;
+        st.messageId = (await post(st.channelId, { embeds: [embed] })).id;
       } else if (card !== st.lastCard) {
-        await edit(st.channelId, st.messageId, card);
+        await edit(st.channelId, st.messageId, { embeds: [embed] });
       }
       st.lastCard = card;
       st.lastEdit = Date.now();
