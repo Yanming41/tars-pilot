@@ -10,9 +10,13 @@
 
 run_* 默认阻塞直到执行完（回放一般几秒到十几秒，交给 GPT 兜底时可能一两分钟）。
 返回的是任务对象：status 为 done / fail / cancelled / error，result 里有 answer、usedGPT、failedStep 等，log 是执行日志。
+
+如果 tars-pilot 开了 Discord 播报：环境变量 TARS_DISCORD_CHANNEL(频道/帖子 ID)和 TARS_CALLER(调用方名字)
+有值的话会自动带上，进度卡片就发到那个频道/帖子里；不设就发主频道。
 """
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -50,16 +54,25 @@ class TarsPilot:
     def recipes(self) -> list[dict]:
         return self._request("GET", "/recipes", timeout=10)
 
+    @staticmethod
+    def _origin() -> dict:
+        origin = {}
+        if os.environ.get("TARS_DISCORD_CHANNEL"):
+            origin["discord_channel_id"] = os.environ["TARS_DISCORD_CHANNEL"]
+        if os.environ.get("TARS_CALLER"):
+            origin["caller"] = os.environ["TARS_CALLER"]
+        return origin
+
     def run_recipe(self, name: str, vars: dict | None = None, *, fallback: bool = True, heal: bool = False,
                    wait: bool = True) -> dict:
         """按模板回放；某步失败时（fallback=True）自动交给 GPT 从当前画面接着做。"""
         return self._request("POST", "/runs", {"recipe": name, "vars": vars or {}, "fallback": fallback,
-                                               "heal": heal, "wait": wait})
+                                               "heal": heal, "wait": wait, **self._origin()})
 
     def run_task(self, task: str, vars: dict | None = None, *, save: str | None = None,
                  max_steps: int | None = None, wait: bool = True) -> dict:
         """让 GPT 规划 + UI-TARS 定位完成任务；save 给了名字且成功时，存成模板。"""
-        body = {"task": task, "vars": vars or {}, "wait": wait}
+        body = {"task": task, "vars": vars or {}, "wait": wait, **self._origin()}
         if save:
             body["save"] = save
         if max_steps:

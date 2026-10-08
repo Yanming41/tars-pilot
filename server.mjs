@@ -15,6 +15,9 @@
 //        GPT 任务: { "task": "打开...搜索 {{keyword}}", "vars": {...}, "save": "模板名(可选)", "maxSteps": 25 }
 //   GET  /runs  /runs/:id          任务状态/结果/日志
 //   POST /runs/:id/cancel          取消（排队中的直接移除，执行中的会在当前步骤后停下）
+//
+// 任务进度播报到 Discord(可选)：有 ~/.discord_dm/tars_discord.json 就开启，见 reporters/discord.mjs；
+//   请求里加 "discord_channel_id" 指定发到哪个频道/帖子，不加就发主频道；"caller" 会显示在卡片上。
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
@@ -22,6 +25,7 @@ import { mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { cfg, fillVars, here } from './lib.mjs';
 import { runAgent } from './planner.mjs';
+import { createDiscordReporter } from './reporters/discord.mjs';
 import { listRecipes, loadRecipe, runRecipe, saveRecipe } from './recipes.mjs';
 
 const serverCfg = { host: '127.0.0.1', port: 8765, token: '', ...cfg.server };
@@ -29,6 +33,7 @@ const runs = new Map();
 const queue = [];
 let current = null;
 let shuttingDown = false;
+const reporter = createDiscordReporter(cfg.discordReporterConfig);
 
 // 执行中的任务的输出同时记到它自己的日志里，接口可以取回
 for (const level of ['log', 'error']) {
@@ -36,8 +41,10 @@ for (const level of ['log', 'error']) {
   console[level] = (...args) => {
     orig(...args);
     if (current) {
-      current.log.push(args.map(String).join(' ').trim());
+      const line = args.map(String).join(' ').trim();
+      current.log.push(line);
       if (current.log.length > 500) current.log.shift();
+      reporter?.onLog(current, line);
     }
   };
 }
@@ -134,6 +141,7 @@ function finish(run, status, result) {
   run.finishedAt = new Date().toISOString();
   for (const w of run.waiters) w();
   run.waiters = [];
+  reporter?.onFinished(run);
 }
 
 async function execute(run) {
@@ -220,7 +228,8 @@ function submit(body) {
   };
   runs.set(run.id, run);
   queue.push(run);
-  pump();
+  pump(); // 没有排队的话这里已经同步变成 running，卡片就不会先显示"排队中"
+  reporter?.onCreated(run);
   return run;
 }
 
