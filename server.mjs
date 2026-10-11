@@ -17,7 +17,8 @@
 //   POST /runs/:id/cancel          取消（排队中的直接移除，执行中的会在当前步骤后停下）
 //
 // 任务进度播报到 Discord(可选)：有 ~/.discord_dm/tars_discord.json 就开启，见 reporters/discord.mjs；
-//   请求里加 "discord_channel_id" 指定发到哪个频道/帖子，不加就发主频道；"caller" 会显示在卡片上。
+//   请求里加 "discord_channel_id" 指定发到哪个频道/帖子；不加时，如果请求来自桥接开的 Claude Code 会话
+//   (哪怕是直接 curl)，自动发到那个会话的帖子(reporters/origin.mjs)，否则发主频道。"caller" 会显示在卡片上。
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
@@ -26,6 +27,7 @@ import { join } from 'node:path';
 import { cfg, fillVars, here } from './lib.mjs';
 import { runAgent } from './planner.mjs';
 import { createDiscordReporter } from './reporters/discord.mjs';
+import { guessOrigin } from './reporters/origin.mjs';
 import { listRecipes, loadRecipe, runRecipe, saveRecipe } from './recipes.mjs';
 
 const serverCfg = { host: '127.0.0.1', port: 8765, token: '', ...cfg.server };
@@ -307,6 +309,11 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'POST' && parts.length === 1) {
         const body = await readJson(req);
+        // 没写发到哪(比如 Claude 直接 curl)：按发请求的进程认出是哪个帖子的 Claude
+        if (reporter && !body.discord_channel_id) {
+          const origin = await guessOrigin(req.socket).catch(() => null);
+          if (origin) Object.assign(body, { discord_channel_id: origin.discord_channel_id, caller: body.caller || origin.caller });
+        }
         let run2;
         try {
           run2 = submit(body);
