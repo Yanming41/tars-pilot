@@ -28,6 +28,7 @@ import { cfg, fillVars, here } from './lib.mjs';
 import { runAgent } from './planner.mjs';
 import { createDiscordReporter } from './reporters/discord.mjs';
 import { guessOrigin } from './reporters/origin.mjs';
+import { attachRun, updateRun, getBatch, endBatch, idleBatches, viewBatch } from './batches.mjs';
 import { listRecipes, loadRecipe, runRecipe, saveRecipe } from './recipes.mjs';
 
 const serverCfg = { host: '127.0.0.1', port: 8765, token: '', ...cfg.server };
@@ -143,8 +144,17 @@ function finish(run, status, result) {
   run.finishedAt = new Date().toISOString();
   for (const w of run.waiters) w();
   run.waiters = [];
+  updateRun(run);
   reporter?.onFinished(run);
 }
+
+// 调用方忘了结束(或者崩了)的批次：一段时间没有新任务就自动结束，汇总卡定格
+setInterval(() => {
+  for (const b of idleBatches()) {
+    endBatch(b.key, 'idle');
+    reporter?.onBatchEnded(b);
+  }
+}, 60_000).unref();
 
 async function execute(run) {
   const req = run.request;
@@ -182,6 +192,7 @@ async function pump() {
   current = queue.shift();
   current.status = 'running';
   current.startedAt = new Date().toISOString();
+  updateRun(current);
   const run = current;
   lastActivity = Date.now();
   try {
@@ -229,6 +240,7 @@ function submit(body) {
     waiters: [],
   };
   runs.set(run.id, run);
+  attachRun(run);
   queue.push(run);
   pump(); // 没有排队的话这里已经同步变成 running，卡片就不会先显示"排队中"
   reporter?.onCreated(run);
@@ -288,6 +300,18 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, loadRecipe(parts[1]));
       } catch {
         return send(res, 404, { error: `没有模板 ${parts[1]}` });
+      }
+    }
+    if (parts[0] === 'batches' && parts[1]) {
+      const batch = getBatch(parts[1]);
+      if (!batch) return send(res, 404, { error: '没有这个批次' });
+      if (req.method === 'GET' && parts.length === 2) return send(res, 200, viewBatch(batch));
+      if (req.method === 'POST' && parts[2] === 'end') {
+        if (!batch.endedAt) {
+          endBatch(batch.key, 'ended');
+          reporter?.onBatchEnded(batch);
+        }
+        return send(res, 200, viewBatch(batch));
       }
     }
     if (parts[0] === 'runs') {

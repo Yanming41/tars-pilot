@@ -1,5 +1,7 @@
 // 把 tars-pilot 的每个任务播报到 Discord：一张卡片，执行中原地刷新(第几步、当前进度、最近动作)，结束时变成结果；
 // 需要用户马上处理的通知([通知] 开头的日志行，比如 Duo 匹配码)和任务结束时，各发一条 @ 用户。
+// 带批次号的任务(见 batches.mjs)不各发各的：整个批次一张汇总卡原地刷新，结束时不 @，
+// 只有 [通知] 照样单独 @；卡片上的「📂 展开明细」按钮由 discord_bridge 处理(读 GET /batches/:key)。
 //
 // 发到哪：请求里的 discord_channel_id(主频道，或者论坛里某个帖子的 ID)；没给就发主频道。
 // 调用方通常不用手填：Python 客户端会自动读环境变量 TARS_DISCORD_CHANNEL 带上。
@@ -12,6 +14,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { counts, getBatch, shortDesc } from '../batches.mjs';
 
 const EDIT_MS = 5000;
 const DEFAULT_MAX_STEPS = 25;
@@ -126,7 +129,69 @@ export function renderCard(run) {
   };
 }
 
-/** 返回 { onCreated, onLog, onFinished }；没有配置文件时返回 null(不播报)。三个回调都不会抛错。 */
+const ENTRY_ICONS = { done: '✅', cancelled: '⏹', queued: '🕒', running: '⏳' };
+export const entryIcon = (status) => ENTRY_ICONS[status] ?? '❌';
+
+/** 批次汇总卡：最上面是当前在做的事，下面是计数和最近几条；明细点按钮看 */
+export function renderBatchCard(batch, currentRun) {
+  const c = counts(batch);
+  const ended = Boolean(batch.endedAt);
+  const lastAt = ended ? batch.endedAt : Date.now();
+  let head;
+  let color;
+  if (!ended) {
+    head = '🔄 进行中';
+    color = COLORS.running;
+  } else if (batch.endReason === 'idle') {
+    head = '⚠️ 已停止（15 分钟没有新任务）';
+    color = COLORS.cancelled;
+  } else {
+    head = c.failed ? '✅ 本轮结束（有失败）' : '✅ 本轮结束';
+    color = c.failed ? COLORS.cancelled : COLORS.done;
+  }
+
+  let description;
+  if (!ended && currentRun?.status === 'running') {
+    const info = parseLog(currentRun.log);
+    const step = !info.step ? '准备中' : info.totalSteps ? `第 ${info.step}/${info.totalSteps} 步` : `第 ${info.step} 步`;
+    description = `**▶ 当前：** ${clip(plain(shortDesc(currentRun.request)), 150)}（${step}）`;
+    if (info.modelStarting && !info.step) description += '\n正在启动本地视觉模型，第一次要 1-2 分钟…';
+    else if (info.progress) description += `\n${clip(plain(info.progress), 200)}`;
+  } else if (!ended) {
+    description = c.pending ? `**▶ 当前：** 排队中（${c.pending} 个）` : '**▶ 当前：** 等下一个任务…';
+  } else {
+    description = `共执行 ${c.total} 次，用时 ${formatElapsed(lastAt - batch.createdAt)}`;
+  }
+
+  const tally = [`✅ ${c.done}`, `❌ ${c.failed}`, c.cancelled ? `⏹ ${c.cancelled}` : null].filter(Boolean).join('　');
+  const fields = [
+    { name: '已执行', value: `${c.total} 次　${tally}`, inline: true },
+    { name: '已用', value: formatElapsed(lastAt - batch.createdAt), inline: true },
+    { name: '来自', value: batch.caller || '未注明', inline: true },
+  ];
+  const recent = batch.entries
+    .filter((e) => e.finishedAt)
+    .slice(-3)
+    .reverse()
+    .map((e) => `${entryIcon(e.status)} ${clip(plain(e.desc), 60)}${e.status !== 'done' && e.answer ? ` — ${clip(e.answer, 60)}` : ''}`);
+  if (recent.length) fields.push({ name: '最近', value: recent.join('\n'), inline: false });
+
+  return {
+    embed: {
+      title: `🗂️ ${batch.title || '批量网页任务'} · ${head}`,
+      description,
+      color,
+      fields,
+      footer: { text: `tars-pilot · 批次 ${batch.id}` },
+      timestamp: new Date(batch.createdAt).toISOString(),
+    },
+    components: [
+      { type: 1, components: [{ type: 2, style: 2, label: '展开明细', emoji: { name: '📂' }, custom_id: `tb:${batch.key}:0` }] },
+    ],
+  };
+}
+
+/** 返回 { onCreated, onLog, onFinished, onBatchEnded }；没有配置文件时返回 null(不播报)。回调都不会抛错。 */
 export function createDiscordReporter(configPath = join(homedir(), '.discord_dm', 'tars_discord.json')) {
   if (!existsSync(configPath)) return null;
   const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
@@ -144,9 +209,11 @@ export function createDiscordReporter(configPath = join(homedir(), '.discord_dm'
     ...(typeof payload === 'string' ? { content: payload } : payload),
     allowed_mentions: mention && ownerId ? { users: [ownerId] } : NO_MENTIONS,
   });
+  // 带按钮的消息要加 with_components=true，webhook 才会收下 components
+  const withComponents = (payload) => (payload?.components ? 'with_components=true' : '');
   const post = async (channelId, payload, mention = false) => {
     const t = target(channelId);
-    const res = await fetch(`${t.url}?${['wait=true', t.query].filter(Boolean).join('&')}`, {
+    const res = await fetch(`${t.url}?${['wait=true', t.query, withComponents(payload)].filter(Boolean).join('&')}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(toBody(payload, mention)),
@@ -156,7 +223,8 @@ export function createDiscordReporter(configPath = join(homedir(), '.discord_dm'
   };
   const edit = async (channelId, messageId, payload) => {
     const t = target(channelId);
-    const res = await fetch(`${t.url}/messages/${messageId}${t.query ? `?${t.query}` : ''}`, {
+    const query = [t.query, withComponents(payload)].filter(Boolean).join('&');
+    const res = await fetch(`${t.url}/messages/${messageId}${query ? `?${query}` : ''}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(toBody(payload, false)),
@@ -201,19 +269,84 @@ export function createDiscordReporter(configPath = join(homedir(), '.discord_dm'
     st.timer.unref?.();
   };
 
+  // 批次：每个批次一份播报状态，一张卡片
+  const batchStates = new Map();
+  const batchStateOf = (batch) => {
+    if (!batchStates.has(batch.key)) {
+      batchStates.set(batch.key, { channelId: batch.channelId || mainChannelId, messageId: null, lastCard: '', lastEdit: 0, timer: null, current: null, chain: Promise.resolve() });
+    }
+    return batchStates.get(batch.key);
+  };
+  const refreshBatch = (batch, bst) =>
+    enqueue(bst, async () => {
+      const { embed, components } = renderBatchCard(batch, bst.current);
+      const card = JSON.stringify({ ...embed, timestamp: undefined });
+      if (!bst.messageId) {
+        bst.messageId = (await post(bst.channelId, { embeds: [embed], components })).id;
+      } else if (card !== bst.lastCard) {
+        await edit(bst.channelId, bst.messageId, { embeds: [embed], components });
+      }
+      bst.lastCard = card;
+      bst.lastEdit = Date.now();
+    });
+  const scheduleBatch = (batch, bst) => {
+    if (bst.timer) return;
+    const wait = Math.max(0, EDIT_MS - (Date.now() - bst.lastEdit));
+    bst.timer = setTimeout(() => {
+      bst.timer = null;
+      refreshBatch(batch, bst);
+    }, wait);
+    bst.timer.unref?.();
+  };
+  const batchOf = (run) => (run.batchKey ? getBatch(run.batchKey) : null);
+  const notify = (st, run, line) => {
+    const notice = String(line).match(/\[通知\]\s*(.+)/);
+    if (notice && ownerId) {
+      enqueue(st, () => post(st.channelId, `🔔 <@${ownerId}> 网页任务 \`${String(run.id).slice(0, 8)}\` 需要你：${notice[1]}`, true));
+    }
+  };
+
   return {
     onCreated(run) {
+      const batch = batchOf(run);
+      if (batch) {
+        const bst = batchStateOf(batch);
+        if (run.status === 'running') bst.current = run;
+        // 第一张卡马上发，之后的更新节流
+        if (!bst.messageId && !bst.lastEdit) refreshBatch(batch, bst);
+        else scheduleBatch(batch, bst);
+        return;
+      }
       refresh(run, stateOf(run));
     },
     onLog(run, line) {
-      const st = stateOf(run);
-      const notice = String(line).match(/\[通知\]\s*(.+)/);
-      if (notice && ownerId) {
-        enqueue(st, () => post(st.channelId, `🔔 <@${ownerId}> 网页任务 \`${String(run.id).slice(0, 8)}\` 需要你：${notice[1]}`, true));
+      const batch = batchOf(run);
+      if (batch) {
+        const bst = batchStateOf(batch);
+        bst.current = run;
+        notify(bst, run, line);
+        scheduleBatch(batch, bst);
+        return;
       }
+      const st = stateOf(run);
+      notify(st, run, line);
       scheduleRefresh(run, st);
     },
+    onBatchEnded(batch) {
+      const bst = batchStateOf(batch);
+      if (bst.timer) clearTimeout(bst.timer);
+      bst.timer = null;
+      bst.current = null;
+      refreshBatch(batch, bst);
+    },
     onFinished(run) {
+      const batch = batchOf(run);
+      if (batch) {
+        const bst = batchStateOf(batch);
+        if (bst.current === run) bst.current = null;
+        scheduleBatch(batch, bst);
+        return;
+      }
       const st = stateOf(run);
       if (st.timer) clearTimeout(st.timer);
       st.timer = null;
